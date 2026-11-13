@@ -1,9 +1,144 @@
 # Linux qualification lane
 
-This runbook is for maintainers running the Debian Linux release qualification lane. For normal
-Linux installation, follow the [operations guide](OPERATIONS.md#2-cli-and-daemon-installation).
-Debian 13 (trixie) x86-64 is qualified in the current stable release (`v0.7.4`); see
-[Compatibility](COMPATIBILITY.md) and [Release status](RELEASE_STATUS.md).
+This runbook is for release maintainers running the disposable Debian Linux qualification lane for OMP Session Gateway, the companion to Oh My Pi (OMP).
+
+[`scripts/provision-linux-qual.sh`](../scripts/provision-linux-qual.sh) provisions one throwaway DigitalOcean Debian 13 (`debian-13-x64`) virtual machine as a tagged Tailscale node, verifies and installs a signed release archive alongside stock OMP from [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), measures host lifecycle, upgrade, rollback, identity denial, and reboot persistence, and destroys the droplet.
+
+For normal Linux setup, follow [CLI and daemon installation](OPERATIONS.md#2-cli-and-daemon-installation). For what is qualified in the latest release, see [Current claim](COMPATIBILITY.md#current-claim) and the [release ledger](RELEASE_STATUS.md). Throughout this runbook, `omp-gateway <command>` is shorthand for `bun apps/gateway/src/cli.js <command>` run from the extracted release archive.
+
+## Run the lane
+
+Export the provider credentials and two distinct published signed tags from `carrythroughsystems/omp-session-gateway`, then run the script's four commands in order (local `provision` does not pre-check the tags, so confirm both releases exist first):
+
+```sh
+export DIGITALOCEAN_ACCESS_TOKEN=...
+export TS_AUTHKEY=tskey-auth-...
+export TS_API_KEY=tskey-api-...                  # optional locally; deletes the tailnet device record
+export OMP_QUAL_RELEASE_TAG=vX.Y.Z-prealpha.N
+export OMP_QUAL_PREVIOUS_TAG=vX.Y.Z
+
+scripts/provision-linux-qual.sh provision
+scripts/provision-linux-qual.sh qualify [lane...]
+scripts/provision-linux-qual.sh status
+scripts/provision-linux-qual.sh destroy
+```
+
+`qualify` accepts ten lane names: `host`, `artifact`, `lifecycle`, `omp`, `migration`, `rollback`, `identity`, `persistence`, `uninstall`, and `init`.
+
+- With `OMP_QUAL_INIT=systemd` (default), omitting `[lane...]` runs `host artifact lifecycle omp migration rollback identity persistence uninstall`. On a fresh droplet or after `uninstall` removes the service and Serve mapping, `omp`, `migration`, `rollback`, `identity`, `persistence`, and `uninstall` require `artifact lifecycle` ahead of them, and `rollback` requires `migration` immediately before it with distinct tags.
+- With `OMP_QUAL_INIT=openrc`, set `OMP_QUAL_IMAGE` to an imported non-systemd custom image ID (`doctl compute image list-user`); omitting `[lane...]` runs `host artifact init` (`init` requires `artifact`), and preflight refuses every systemd-dependent lane before contacting the droplet.
+
+A passing `qualify` run exits `0` and prints `== Qualification lanes finished` followed by `Every line above is a measurement, not a verdict. Nothing here promotes a ledger row.`
+
+Within the run, `migration` (13 rows), `persistence`, and `init` (3 rows) print `INVARIANT OBSERVED RESULT` tables ending in `PASS`, and `rollback` ends with `N/N invariants PASS`, where both counts match (`83/83` in the release ledger receipts that record the count). While the droplet exists, the `EXIT` trap prints a boxed `omp-gateway-qual IS STILL RUNNING AND STILL BILLING` reminder.
+
+## Prerequisites and credentials
+
+Workstation runs require `doctl`, `jq`, `ssh`, `scp`, `ssh-keygen`, `curl`, `python3`, `sha256sum` (or `shasum`), and an authenticated `gh` CLI on `PATH`, plus a tailnet with MagicDNS, HTTPS certificates, and access policy for `tag:omp-session-gateway` ([Tailnet access policy](OPERATIONS.md#4-tailnet-access-policy)).
+
+Preflight checks `OMP_QUAL_SSH_KEY_ID` (`doctl compute ssh-key list`) against `${OMP_QUAL_SSH_IDENTITY}.pub`, `~/.ssh/*.pub`, or `ssh-agent` by MD5 fingerprint; exercising the allowed-user half of `identity` also requires running from a user-owned workstation on that tailnet (read from `tailscale status --json` unless `OMP_QUAL_ALLOWED_LOGIN` overrides it).
+
+On `ubuntu-24.04` in CI, [`.github/workflows/droplet-qualification.yml`](../.github/workflows/droplet-qualification.yml) installs `doctl` `1.166.0` by SHA-256, uses the runner's `gh`, `jq`, and `ssh`, and registers an ephemeral 4,096-bit RSA key (`omp-qual-ci-<run_id>-<run_attempt>`).
+
+All credentials come from environment variables or repository secrets and never enter `argv`, cloud-init user data, or retained evidence:
+
+| Variable | Local requirement | CI secret requirement | Purpose |
+|---|---|---|---|
+| `DIGITALOCEAN_ACCESS_TOKEN` | Required unless `doctl auth init` is active | Required secret | Authenticates `doctl` and `curl` stdin bearer calls (droplet, image, and in CI SSH-key read/write scope). |
+| `TS_AUTHKEY` | Required when `OMP_QUAL_INIT=systemd` | Required secret | Non-ephemeral, pre-approved `tskey-auth-` key carrying `tag:omp-session-gateway`; streamed over SSH stdin to a `0600` file for `tailscale login`. |
+| `TS_API_KEY` | Optional (deletes the tailnet device) | Required secret | `tskey-api-` token; reads `TS_AUTHKEY` expiry in CI (warning at 14 days or fewer) and deletes the tailnet device record in `destroy`. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | Optional (`GH_TOKEN`; keep unset to stay offline) | Automatic `GITHUB_TOKEN` (`GH_TOKEN` forbidden) | Unset `GH_TOKEN` downloads attestation bundles on the workstation or runner and verifies offline (`--bundle`); setting `GH_TOKEN` sends it over SSH stdin for online verification. |
+
+The workflow's error messages and the script header cite this document's sections 8, 9, and 10 by number. Those numbers are the archived sections below ([8](#8-what-this-lane-does-not-prove), [9](#9-unattended-runs-in-ci), [10](#10-the-non-systemd-path-alpine-and-openrc)); for a missing secret, the table above is the current list.
+
+## Environment variables
+
+`scripts/provision-linux-qual.sh` reads these `OMP_QUAL_*` variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OMP_QUAL_RELEASE_TAG` | unset (required) | Signed candidate tag downloaded and verified by `artifact` and `migration`. |
+| `OMP_QUAL_PREVIOUS_TAG` | unset (required for `migration`) | Published signed predecessor tag staged by `migration` and exercised by `rollback`. |
+| `OMP_QUAL_VERSION` | `MAJOR.MINOR.PATCH` from `OMP_QUAL_RELEASE_TAG` | Overrides the version segment in candidate archive and SBOM filenames. |
+| `OMP_QUAL_NAME` | `omp-gateway-qual` | Fixed droplet name and ownership tag used for idempotent lookup and teardown. |
+| `OMP_QUAL_REGION` | `sfo3` | DigitalOcean region slug. |
+| `OMP_QUAL_SIZE` | `s-2vcpu-8gb-amd` | DigitalOcean droplet size slug. |
+| `OMP_QUAL_IMAGE` | `debian-13-x64` | Distribution image slug, or a numeric DigitalOcean custom image ID. |
+| `OMP_QUAL_INIT` | `systemd` | Expected init system (`systemd`, or `openrc` to observe non-systemd refusal). |
+| `OMP_QUAL_SSH_KEY_ID` | `11924832` | DigitalOcean SSH key ID verified in preflight and attached at creation. |
+| `OMP_QUAL_SSH_IDENTITY` | unset (`~/.ssh/*.pub` or `ssh-agent`) | Private key path passed to `ssh` and `scp` with `IdentitiesOnly=yes`. |
+| `OMP_QUAL_USER` | `ompqual` | Non-root Linux account that owns the gateway user service. |
+| `OMP_QUAL_ALLOWED_LOGIN` | login from local `tailscale status --json` | User-owned tailnet login for the allowed half of `identity`. |
+| `OMP_QUAL_PORT` | `4317` | Gateway loopback TCP port. |
+| `OMP_QUAL_TAG` | `tag:omp-session-gateway` | Expected Tailscale node tag named in preflight and warning messages. |
+| `OMP_QUAL_BUN_VERSION` | `bunVersion` from `UPSTREAM.lock.json` (`1.4.4`) | Bun version installed on the droplet. |
+| `OMP_QUAL_GH_VERSION` | `2.97.0` | `gh` CLI version downloaded onto the droplet for `artifact`. |
+| `OMP_QUAL_COSIGN_VERSION` | `3.1.3` | `cosign` version downloaded onto the droplet for `artifact` and `migration`. |
+| `OMP_QUAL_EVIDENCE_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/omp-session-gateway-qual/provider-evidence` | Directory retaining credential-free DigitalOcean API responses and HTTP statuses. |
+
+## What each lane proves
+
+Each `qualify` sub-lane measures one host, artifact, or lifecycle boundary (where a `generation` is OMP's counter that changes when a session is replaced, preventing a stale card from opening a newer session):
+
+| Lane | Measures | Does not prove |
+|---|---|---|
+| `host` | OS release, kernel, `systemd-detect-virt`, `systemctl --version`, vCPUs, memory, boot ID, uptime, metadata public IPv4, and qualified user UID/shell. | Bare-metal hardware (`systemd-detect-virt` reports `kvm`) or gateway installation. |
+| `artifact` | Droplet-side `SHA256SUMS`, `cosign verify-blob`, and `gh attestation verify`; archive extraction, `UPSTREAM.lock.json` and `release-info.json` pins, and pinned Bun installation. | Runtime behavior of the extracted gateway build. |
+| `lifecycle` | `tailscale serve`, `omp-gateway install`, `status`, `0600` file modes, loopback-only bind, tagged-node `doctor`, `rotate-readiness-token` PID change, and token-free `doctor --bundle`. | All-true `doctor` on a tagged node (`identityAllowed`, `pwa`, and `sessionHealth` fail closed without a user identity). |
+| `omp` | Builds stock OMP from `UPSTREAM.lock.json`, runs `ci:check:full` (1,500 s cap), sets `collab.autoStart` to `control`, verifies generation-1 discovery, `no-store` **View** and **Control** launches, revocation, and cleanup. | Browser UI, Web Push, `/new` or `/fork` transitions, or OMP retention for later lanes. |
+| `migration` | Verifies `OMP_QUAL_PREVIOUS_TAG`, runs predecessor `install`, candidate upgrade, and predecessor reinstall, checking 13 invariants across `current.json`, `versions/`, `config.json`, `readiness-token`, `ExecStart`, PID, and loopback. | The `omp-gateway rollback` command (uses `install` and `uninstall` only), or migration when tags match (skips, which then fails `rollback`). |
+| `rollback` | Stopped and active `omp-gateway rollback` and `rollback --to`, active predecessor takeover, induced newer-unit/older-pointer divergence (`diverged: true`), signed reinstall recovery, and candidate restoration. | OMP binary rollback, activation failure of a corrupted staged runtime, or pointer-ahead-of-unit divergence. |
+| `identity` | Tagged self-probe `403` without `Tailscale-User-*` headers, TUN mode, refused public and tailnet `ip:port` probes, and user-owned `403`, `200` (`no-store`), and forged-header checks. | Denial on an untagged node (skips), the allowed half without a user-owned tailnet workstation login, or a second person's tailnet account. |
+| `persistence` | Two boot-ID-verified reboots checked as `root`: Pass A (`disable-linger`: no sessions or daemon before login) and Pass B (`enable-linger`: `manager` session and daemon at boot). | Persistence on macOS, Windows, or non-systemd Linux distributions. |
+| `uninstall` | Refusal of `omp-gateway uninstall --no-stop` while active, then `uninstall` removing the unit, daemon, and listener, plus `tailscale serve reset`. | Removal of `config.json`, `readiness-token`, the state directory ([Paths](OPERATIONS.md#13-paths)), or the droplet itself. |
+| `init` | On `OMP_QUAL_INIT=openrc`, asserts `install refused`, `no gateway process survives`, and `nothing answers on the gateway port`, printing residue and CLI output. | OpenRC service support, Tailscale Serve, or reboot persistence (no-ops when `/run/systemd/system` exists). |
+
+## Run it in CI
+
+`.github/workflows/droplet-qualification.yml` runs on manual `workflow_dispatch` only (never on `push`, `pull_request`, or a schedule), serialized in the `droplet-linux-qualification` concurrency group (`cancel-in-progress: false`) with a 50-minute job timeout. Preflight fails before creating a droplet if any secret or release asset is missing or if a droplet named `omp-gateway-qual` exists.
+
+Start it from GitHub Actions or with `gh`:
+
+```sh
+gh workflow run droplet-qualification.yml \
+  -f release_tag=vX.Y.Z-prealpha.N \
+  -f previous_tag=vX.Y.Z
+```
+
+| Input | Required | Default | Purpose |
+|---|---|---|---|
+| `release_tag` | yes | none | Signed candidate tag (`<tar>`, `<spdx.json>`, `SHA256SUMS`, and three `.sigstore.json` bundles checked in preflight). |
+| `previous_tag` | yes | none | Exact signed predecessor tag for `migration` and `rollback` (same six assets checked). |
+| `qualification_id` | no | `""` | Opaque resume ID from `scripts/stable-qualification.ts` placed in `run-name` (`Stable qualification <id>`); leave empty on manual runs. |
+| `lanes` | no | `""` | Space-separated systemd lane subset (`artifact lifecycle` required before service lanes, and `migration` before `rollback`); empty runs all. |
+| `droplet_size` | no | `s-2vcpu-8gb-amd` | DigitalOcean droplet size slug. |
+
+Two things CI cannot measure:
+
+- Allowed-user identity probes: the hosted runner is not a user-owned tailnet node and leaves `OMP_QUAL_ALLOWED_LOGIN` unset, so `identity` exercises tagged self-denial (`403`) and public-Internet port refusal but skips the allowlisted `200`, `no-store`, and forged-header checks.
+- Non-systemd refusal (`init`): the workflow runs with `OMP_QUAL_INIT=systemd` and rejects `init` in the `lanes` input list.
+
+## Teardown and cost
+
+`scripts/provision-linux-qual.sh destroy` resets `tailscale serve`, runs `tailscale logout` when the droplet is reachable, and deletes the tailnet device when `TS_API_KEY` is set. Under `${XDG_STATE_HOME:-$HOME/.local/state}/omp-session-gateway-qual/`, it reads `droplet_id` from `${OMP_QUAL_NAME}.json`, calls `DELETE /droplets/$DROPLET_ID`, and polls `GET /droplets/$DROPLET_ID` up to 150 seconds until HTTP `404` before removing `${OMP_QUAL_NAME}.json` and `${OMP_QUAL_NAME}.known_hosts`.
+
+Any transport, parse, or non-`404` error leaves state intact and exits non-zero; a matching tag without a local `droplet_id` (such as a droplet leaked by CI) is never adopted or deleted automatically and must be verified with `doctl compute droplet list` and deleted by ID in DigitalOcean.
+
+In CI, an `if: always()` step runs `destroy` whenever `provision` executed, deletes the `omp-qual-ci-<run_id>-*` SSH key, and uploads credential-free API logs as `droplet-provider-<run_id>-<run_attempt>` for 90 days.
+
+Neither the script nor the workflow hardcodes a droplet price: `provision`, `status`, and `destroy` query `doctl compute size list` for the selected size's `price_hourly` and print elapsed hours and accrued dollars (DigitalOcean bills whole hours without partial refunds).
+
+Imported custom images for `OMP_QUAL_INIT=openrc` accrue `$0.06` per GB per month and are not deleted by `destroy`; `destroy` lists every user image in the account with its monthly cost and prints `doctl compute image delete <id> --force`.
+
+Confirm nothing remains running or billing:
+
+```sh
+scripts/provision-linux-qual.sh status
+doctl compute droplet list --tag-name omp-gateway-qual
+doctl compute image list-user
+```
+
+`status` prints `omp-gateway-qual: absent (nothing is billing)` when no retained droplet or tagged `omp-gateway-qual` resource exists; in CI, verify `teardown: droplet absence confirmed` in the job summary, and check the Tailscale admin console if `TS_API_KEY` was unset locally.
 
 ## Mainline qualification — Debian core lane passed
 

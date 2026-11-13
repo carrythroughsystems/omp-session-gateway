@@ -1,9 +1,10 @@
 # Compatibility and support policy
 
+This policy tells administrators and evaluators which platforms, browsers, Oh My Pi (OMP) versions, and deployment paths OMP Session Gateway supports and qualifies, and what each status term means.
+
 ## Platforms and browsers
 
-Use OMP Session Gateway from a modern browser, and install it as a PWA where the platform supports
-web-app installation. The gateway runs on the computer that runs OMP.
+The gateway runs on the computer (host) that runs OMP; open **OMP Sessions** from a modern browser, or install it as an app where your platform supports web-app installation.
 
 <!-- release-generate:platforms:start -->
 | Surface | Status | Tested by | Qualified on hardware |
@@ -21,85 +22,17 @@ web-app installation. The gateway runs on the computer that runs OMP.
 
 ### What the words mean
 
-**Tested** means a named CI lane runs on hosted runners or browser engines. **Supported** means
-every listed lane stays green (on each change, and canaries daily) and bug reports are accepted.
-**Qualified** names what a signed release passed on real hardware or named cloud devices in
-[Current claim](#current-claim) and the [release ledger](RELEASE_STATUS.md), plus the retained
-macOS Virtualization.framework guest under ADR-033; see [Status vocabulary](#status-vocabulary).
+See [Status vocabulary](#status-vocabulary) for the definitions of **Tested**, **Supported**, and **Qualified**. Browser **Tested** lanes allow one retry only in CI and enforce a weekly flake budget; see [Browser retries, evidence, and harness readiness](TEST_PLAN.md#browser-retries-evidence-and-harness-readiness).
 
-Browser **Tested** evidence distinguishes a clean first pass from a flaky retry pass. Both
-`browser-notifications` and `browser-core` allow one retry only for `CI=true`/`CI=1`, retain a
-sanitized per-attempt JSON report for 14 days, and summarize counts and repository test locations;
-local runs have zero retries. Weekly/manual `browser-flake-budget` maintenance enforces at most
-1% flaky logical executions per lane/project and no test/project flaky more than twice over seven
-days, with missing reporter-enabled browser-job evidence failing coverage. Cancelled jobs and
-selective reruns of only sibling jobs owe no new report; outcomes are derived from expected
-status and attempts rather than trusted labels. This containment changes no
-assertion, deadline, browser project, or physical/signed-candidate qualification claim. Prepare
-PRs execute required checks on their own exact checkout, even for a version-only bump; main's
-green results cannot be reused. See [browser evidence policy](TEST_PLAN.md#browser-retries-evidence-and-harness-readiness).
-
-- **Installing as a PWA.** Chromium browsers install from the browser menu on desktop and Android.
-  Safari installs with Add to Home Screen on iPhone and iPad, and Add to Dock on macOS. Desktop
-  Firefox has no web-app install; it works in a tab.
-- **Background alerts** (Web Push) are qualified in full on a physical Pixel with Chrome on Android,
-  where force-stop and forced Doze outcomes are observed variants rather than guaranteed delivery. On
-  iPhone and iPad (iOS and iPadOS 16.4+), Safari offers Web Push to a Home Screen app; a cloud iPhone
-  qualifies enabling alerts in the Home Screen app, delivery with the app in the background, and the
-  tap into Control, without a lock-screen claim (ADR-032).
-- **Alerts from other hosts** (fleet notifications,
-  [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)) are
-  **Tested**, not qualified, on every platform. `implementation-checks` runs two real gateways
-  through grant, feed, coordination, delivery, coordinator restart, and revocation;
-  `browser-notifications` (Chromium at Pixel sizes) and `browser-core` (desktop Chromium and WebKit
-  with iPhone-class emulation) run the installed-app fleet flows. Development runs on the physical
-  Pixel passed every fleet phase; release qualification includes them from the release after
-  v0.10.0 ([fleet notification status](RELEASE_STATUS.md#fleet-notifications-adr-048--tested-not-qualified)).
-- **Browser versions.** The client uses CSS `color-mix()`, `:has()`, and dynamic viewport units, so
-  browsers older than Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
-- **Windows** starts the gateway at interactive logon, not at unattended boot.
-
-- **Terminal environments.** Tern is an execution environment for stock OMP, not a separate gateway
-  integration ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)).
-  Sessions started inside Tern use the same `collab.autoStart` setting and `~/.omp/run/collab-hosts`
-  registry as any other terminal ([Running OMP inside Tern](OMP_INTEGRATION.md#running-omp-inside-tern)),
-  and the [Status vocabulary](#status-vocabulary) (**Tested**, **Supported**, **Qualified**,
-  **Smoke-tested**) applies without a separate Tern row. Developer-workstation execution inside Tern was
-  **smoke-tested on 2026-10-22** (not CI, not release qualification) on macOS (Apple silicon) with Tern
-  `0.9.5` (build `2863c37`), stock OMP `18.12.6` (Homebrew install, one patch release above the
-  `v18.12.5` engineering host baseline pin), `~/.omp` (`PI_CONFIG_DIR` unset), `~/.omp/run/collab-hosts`,
-  `collab.autoStart = control`, and two `dev-localhost` gateways in desktop Chrome: two fresh sessions
-  started with `tern new tab --cwd <dir> -- env OMP_SKIP_SETUP=1 omp …` published within ~13 s while
-  `OmpHostReader` observed all three Tern-hosted hosts (`access: control`, `relayConnected: true`) and
-  ignored ~220 stale publications; the home PWA showed `All hosts` / `Home` / `Remote` with six
-  independent rows for the three colliding Tern `instanceId`s, launched home **View** and remote
-  **View**/**Control** via `OPTIONS …/launch` `204` + `POST …/launch` `200` with no credentials, echoed
-  a synthetic prompt (`401`), routed and answered a real metadata-only ask (`inputRequired: true` →
-  `false`), isolated a stopped remote gateway (`Remote: Cannot reach this host from this app.` with
-  **Retry** and `Host coverage incomplete — Unavailable: Remote`), and exercised keyboard-dictation help
-  plus the opt-in speech flow via an injected fake `SpeechRecognition` constructor (no microphone used).
-  Still pending and not exercised: any phone or installed PWA, the HTTPS Tailscale Serve path (identity
-  headers and real CORS over Serve), Wi-Fi/cellular transitions, session replacement/reconnect/shutdown
-  while inside Tern beyond closing the panes, native browser speech recognition on any device, and Pixel
-  or iPhone keyboard dictation; issue
-  [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380)'s installed-iPhone
-  acceptance is therefore not satisfied yet
-  ([TEST_PLAN.md](TEST_PLAN.md#g-tern-multi-host-federation-and-speech-input-acceptance-matrix)).
-
-### Tern window-selector compatibility observation
-
-Read-only installed-CLI probes on the MacBook and Studio confirmed Tern `0.9.12`
-(`e498b49`). On the two-window MacBook, `inspect --json --window KEY` scopes both
-`sessions[]` and `panes[]`; unknown slots make `inspect` and `ls` exit `1` without stdout.
-Existing OMP panes retain matching block/pane IDs and nonempty `omp_session_file` metadata.
-The sanitized selected-window fixture exercises the existing bounded, lossless parser.
-
-Optional administrator-owned `tern.window` selects `""` (first window) or decimal slots
-`"2"`–`"999"` for creation and every inspection. Absence leaves argv unchanged. Keys are
-reassignable slots, not stable window identities; no fallback or selector-free retry is
-permitted. See the [ADR-043 amendment](DECISIONS.md#2026-11-07-amendment--administrator-selected-tern-window-slots).
-These observations are **not** an effectful two-window creation smoke, platform support
-expansion, or release qualification; the effectful smoke remains pending.
+- Installing as an app: Chromium browsers install **OMP Sessions** from the browser menu on desktop and Android, Safari installs it with Add to Home Screen on iPhone and iPad and Add to Dock on macOS, and desktop Firefox runs it in a tab.
+- **Background alerts** (Web Push) are **Qualified** in full on a physical Pixel with Chrome on Android, where force-stop and forced Doze outcomes are observed variants rather than delivery guarantees.
+  On iPhone and iPad (iOS and iPadOS 16.4+), Safari offers Web Push to a Home Screen app; a cloud iPhone qualifies enabling alerts, background delivery, and the tap into **Control**, without a lock-screen claim ([ADR-032](DECISIONS.md#adr-032--qualify-iphone-ipad-and-android-browsers-on-real-cloud-devices-in-every-stable-campaign)).
+- **Alerts from other hosts** (fleet notifications, where the home gateway serving the installed app sends alerts for selected remote hosts; [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)) are **Qualified** in the physical Pixel background-Push lane across twelve fleet phases using an attached DevTools observer, without a process-cold wake claim when Chrome is not awake ([Release status](RELEASE_STATUS.md)).
+  On other platforms, fleet notifications are **Tested** in `implementation-checks`, `browser-notifications`, and `browser-core`.
+- **Browser versions.** The app uses CSS `color-mix()`, `:has()`, and dynamic viewport units; browsers older than Chrome and Edge 111, Firefox 121, and Safari 16.2 render incorrectly.
+- **Windows.** The scheduled task starts `omp-gatewayd` (the gateway daemon) at interactive logon, not at unattended boot.
+- **Terminal environments.** Tern is a terminal environment where stock OMP runs, not a separate gateway integration ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration)). Sessions in Tern use the same `collab.autoStart` setting and `~/.omp/run/collab-hosts` registry ([Running OMP inside Tern](OMP_INTEGRATION.md#running-omp-inside-tern)), so the table has no Tern row.
+  Opt-in session creation in Tern has been **Smoke-tested** end to end only on Apple silicon macOS and is **Tested** on Linux and Windows by unit suites in `implementation-checks` ([Tern session creation](OPERATIONS.md#9-tern-session-creation)).
 
 ## Current claim
 
@@ -107,146 +40,19 @@ expansion, or release qualification; the effectful smoke remains pending.
 Stable v0.11.0 is published as immutable GitHub Latest. [Release v0.11.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.11.0). Signed candidate v0.11.0-prealpha.1; source 60ca1b9c607921d7d00fb85d3390d0765cf5989a; archive SHA-256 e500780c23cf9f5df4f68cfda9292c2e5dd9aff24ab658fd2b295a512d1dd200. Published v0.10.1 remains the predecessor. Stock OMP v18.18.0 (b5a6b2f7e5b6606b6562e678ead83f21738f34a0), Bun 1.4.4. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 <!-- release-generate:release:end -->
 
-The current Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`),
-which does not exercise bare-metal firmware, FileVault unlock, physical sleep/wake, or startup
-before login (ADR-033). The qualified scope includes the Mac-guest new-generation/fork/resume
-transitions and Pixel Push triage/stale-tap scenarios recorded in the campaign, not arbitrary
-attention or lifecycle behavior on every platform; see [attention acceptance](ATTENTION_SPEC.md)
-and [lifecycle coverage](LIFECYCLE_BRANCH_RESUME.md).
+Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`), which does not exercise bare-metal firmware, FileVault unlock, physical sleep/wake, or startup before login ([ADR-033](DECISIONS.md#adr-033--retain-a-macos-virtual-machine-as-the-campaign-mac)).
 
-Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit
-`4999b98bd5`) is the minimum supported host version: set `collab.autoStart`
-([operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with
-plain `omp`. The current engineering baseline is `v18.20.0` (`UPSTREAM.lock.json`) and the
-qualified host baseline is recorded in the release-generated matrix below, while the independent
-embedded browser client pin is `v18.20.0` (wire `18.20.0`).
-Under registry v1, the gateway validates only the fields it reads and ignores unknown additive
-fields (ADR-028); a registry version bump or a changed type on a consumed field still requires a
-gateway update.
+Qualified attention and lifecycle scope covers the Mac-guest new-generation, fork, and resume transitions and the Pixel Push triage and stale-tap scenarios recorded in the release ledger, not arbitrary attention or lifecycle behavior on every platform; see [Attention specification](ATTENTION_SPEC.md) and [Lifecycle, branch, and resume](LIFECYCLE_BRANCH_RESUME.md).
 
-v18.20.0 (`c308970263ae13744ea15ab67302e3dac840e266`, tree
-`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) keeps the registry, settings, native IPC
-sources and `docs/collab.md` byte-identical to v18.18.0. Registry v1, discovery,
-minimum host `18.1.20` and relay framing stay unchanged. The host can now shed one
-slow guest and send `error.resync`; the matching browser client re-sends `hello`
-within a bounded rejoin budget. Select requests can carry optional `approval`
-metadata without changing their response shape. Ask tool results now describe HTML
-forms and task calls use name/agent/task/steps fields. These browser-client changes
-are adopted by the embedded client's own reviewed refresh, not by the host-only
-baseline procedure. That refresh handles resync, HTML-form Ask and named
-task/step results, while retaining older supported host rendering and its local
-View, acknowledgement and recovery protections. The canary rewind matcher now
-recognizes upstream's positive `Rewound N turns` status as well as the old
-status; the pull-request canary that installed npm `latest` (18.20.0) passed
-every Linux stage and every supported Windows stage, with `branch-rewind` among
-the stages Windows skips, and a release request still runs it pinned to its exact
-version. Neither qualifies a release. The published matrix below is unchanged.
+Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit `4999b98bd5`) is the minimum supported OMP version: set `collab.autoStart` ([Operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with plain `omp`.
 
-v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree
-`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) keeps those contracts unchanged from v18.17.0:
-the complete `packages/coding-agent/src/collab`, `packages/collab-web`, and
-`crates/pi-natives/src/ipc` trees, collaboration commands, extension UI controller,
-`modes/types.ts`, `docs/collab.md`, `docs/extensions.md`, and `packages/wire/src/index.ts`
-are byte-identical. Upstream
-[`shell-trace.ts`](https://github.com/can1357/oh-my-pi/blob/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/wire/src/shell-trace.ts)
-now permits `string | number[]` for non-UTF-8 bytes in bash `details.trace`, including argv,
-assignments, redirections, unit source, and diagnostics. The current embedded client's JSON/AES
-codec preserves these arrays; its bash renderer does not consume `details.trace` and continues
-to show the command, text, images, and status badges, without shell visualization. This is a
-presentation-only limitation, not an observed discovery, launch, or decoding incompatibility.
-Additive bash `details.cwd` / `cdSeparator` and write `details.touchesNoFiles` are also ignored.
-The embedded codec now vendors the upstream pure `asStrictBytes` helper, preserving the
-whole-`ArrayBuffer` fast path and copy fallback. Bun remains `1.4.4` (upstream requires `>=1.4.4`).
+The engineering host baseline (tested in CI) is `v18.20.0` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), the qualified host baseline is in the matrix below, and the embedded browser client is pinned to the same source (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.20.0`) in [`packages/collab-client`](../packages/collab-client/README.md).
 
-The embedded v18.18.0 client (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) adopts shared wire
-envelopes, strict byte buffers, wait lists, job-intent labels and exact-width Markdown code spans.
-Its seven pure pi-utils helpers have exact blob provenance; no native helper package or offline
-export/trace viewer is installed. Shell-trace byte arrays remain safely ignored by the existing
-live command/output renderer. Gateway in-memory bootstrap, View guards, Ask/photo/speech drafts,
-bounded recovery and transcript anchoring remain local patches with named regression proofs in
-`packages/collab-client/upstream/UPSTREAM.json`. The host minimum and published qualification
-matrix are unchanged; source/browser regression tests are not physical-device qualification.
+Under registry v1, the gateway validates only the fields it reads and ignores unknown additive fields ([ADR-028](DECISIONS.md#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)); a registry major bump or a changed type on a consumed field requires a gateway update.
 
-v18.17.0 (`75e7801e247d4e3263439d4cc08ccad60dc64bdd`) keeps registry v1, the discovery file
-format and query contract, the relay protocol, and `collab.autoStart` behavior unchanged from
-v18.16.0: the collaboration host (`packages/coding-agent/src/collab/host.ts`), registry
-(`registry.ts`), settings (`settings.ts`), collaboration slash commands
-(`packages/coding-agent/src/slash-commands/builtin-collaboration.ts`), `docs/collab.md`,
-`packages/collab-web/src/app.tsx` and `lib/client.ts`, and the `crates/pi-natives/src/ipc/`
-native IPC transport (`mod.rs`, `unix.rs`, `windows.rs`) are byte-identical between the two tags.
-[can1357/oh-my-pi#17960](https://github.com/can1357/oh-my-pi/pull/17960) and
-[#17997](https://github.com/can1357/oh-my-pi/pull/17997) add extension transcript presenters
-(`registerTranscriptPresenter`, `ctx.ui.refreshTranscript`) and route CLI guest claim and release
-in `collab/guest.ts` through `ctx.setCollabGuest()`;
-[#16476](https://github.com/can1357/oh-my-pi/pull/16476) adds an extension link browser that
-editor-area dialogs and asks close before mounting;
-[#17961](https://github.com/can1357/oh-my-pi/pull/17961) exposes `getShortcutConflict` and
-keybindings to extensions; and [#17848](https://github.com/can1357/oh-my-pi/pull/17848) adds an
-in-session pin indicator and `/unpin` (`notifySessionPinChanged`) while leaving `/collab`,
-`/join`, and `/leave` unchanged. Upstream direct commits `488cafa0e0` and `fcdda683f1` add
-`packages/wire/src/shell-trace.ts` and `shell-viz.ts` re-exports to `packages/wire/src/index.ts`
-(leaving the relay envelope helpers and types unchanged), `a55b04a332` updates
-`packages/wire/src/tsp.ts`, `19ef041ec5` hardens `packages/natives/test/ipc.test.ts`, and the
-package manifests bump versions, none of which the gateway reads or sends; `adcb8800b6` changes a
-host `wait` tool result's `details.waited` (`CoordinationDetails.waited`) from one message object
-to a list of messages (`null` still means timed out) and updates `collab-web`
-`tool-render/tools/irc.tsx`, so the embedded client carries a local compatibility patch in its
-`irc`/`wait` renderer (`packages/collab-client/upstream/UPSTREAM.json`) to accept both the list
-and the older single message. The v18.18.0 source refresh adopts that list renderer directly,
-retaining only the singleton/null/empty adapter and the regression cases.
-v18.16.0 (`650f3a108229ee11bf68ba3377f4e8c3391cd424`) in turn kept these contracts unchanged from
-v18.12.5: collaboration settings, slash commands, and `collab-web` `app.tsx` and `lib/client.ts`
-are byte-identical, and `docs/collab.md` changes only table formatting.
-[can1357/oh-my-pi#17699](https://github.com/can1357/oh-my-pi/pull/17699) rewrites registry
-validation as schemas that accept the same discovery and snapshot fields, and
-[can1357/oh-my-pi#17704](https://github.com/can1357/oh-my-pi/pull/17704) moves the relay envelope
-helpers into `packages/wire/src/index.ts` with the same byte layout.
-[can1357/oh-my-pi#16682](https://github.com/can1357/oh-my-pi/pull/16682) keeps a dialog-backed ask
-pending across a host relay reconnect, so `inputRequired` may stay `true` through it;
-[can1357/oh-my-pi#16957](https://github.com/can1357/oh-my-pi/pull/16957) lets the host supersede
-queued streaming `message_update` frames, which the embedded client renders from each cumulative
-message; and [can1357/oh-my-pi#16936](https://github.com/can1357/oh-my-pi/pull/16936) rotates the
-room when a session moves to a sibling file, which the gateway sees as a session replacement. The
-remaining changes touch the CLI guest, the `collab-web` export viewer, and extension and TUI
-surfaces, none of which the gateway reads or sends.
-v18.12.5 (`d5cd750e41fede277f9eb933455da92a0738915e`) in turn kept these contracts unchanged from
-v18.12.3: every relevant path is byte-identical between those tags except `package.json`, which
-only the version bumps change, and `docs/extensions.md`, where
-[can1357/oh-my-pi#16361](https://github.com/can1357/oh-my-pi/pull/16361) documents GitLab MR
-references for the extension `ctx.annotations` diff source, which the gateway neither reads nor
-sends. v18.12.3 (`53a0377db6845e0dae606146130766ec92d407fd`) in turn kept these contracts
-unchanged from v18.10.2: the collaboration host, registry, settings, collaboration slash commands,
-`docs/collab.md`, `collab-web` `app.tsx` and `lib/client.ts`, and `packages/wire/src/index.ts`
-are byte-identical between those tags.
-[can1357/oh-my-pi#15680](https://github.com/can1357/oh-my-pi/pull/15680) adds an optional
-`runtime` build identity to session entries, including replicated ones, which the gateway never
-reads and the embedded client does not consume;
-[can1357/oh-my-pi#15467](https://github.com/can1357/oh-my-pi/pull/15467) changes only a CLI
-guest's prompt-cache key; and the remaining changes touch the TUI approval dialog, extension
-plan-review hooks, and a `collab-web` eval renderer now included by the independent v18.12.6 client
-refresh. That refresh also takes render coalescing, streaming-tail Markdown, linear-time
-Markdown/math lexing, and idle agent-drawer polling shutdown. The discovery/query contract is
-unchanged; browser source tests and synthetic smoke do not qualify a new signed artifact.
-Since v18.10.2, upstream
-[`a608a9ca07`](https://github.com/can1357/oh-my-pi/commit/a608a9ca07c9443634e80d877d61c602099dab91)
-serves the registry over native IPC with the same one-line JSON request and response, a 0600
-socket, overlong paths relocated under the owner-only `/tmp/omp-<euid>`, and same-user peers
-only; the gateway reads the published endpoint verbatim, so its queries are unchanged.
-Exact-version canary run
-[42337262675](https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/42337262675)
-passed for stock OMP 18.18.0 on 2026-11-07 at gateway
-`9a3388fd7a96342b1e31989305bf68f6d2958234` across all eleven Linux stages (`prepare`, `publish`,
-`snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
-`continue`, `unregister`) and the eight supported Windows stages (with `new-generation`, `fork`,
-and `branch-rewind` skipped by design on Windows) as **Tested** evidence; no candidate or
-qualification is claimed for v18.18.0, and the release-generated matrix below is unchanged.
-The canary does not exercise non-UTF-8 shell-trace rendering.
-As in v18.8.3, upstream
-[can1357/oh-my-pi#14714](https://github.com/can1357/oh-my-pi/pull/14714) stops mirroring frames
-while no guest is joined, and a generated `sessionName` may carry a title-card prefix
-([OMP integration](OMP_INTEGRATION.md#3-polling-and-lifecycle)). From OMP `18.5.1`, an automatic
-start whose relay is unreachable or times out is retried
-([operator settings](OMP_INTEGRATION.md#1-operator-settings)).
+Upstream reviews across OMP releases through `v18.20.0` verified that registry v1, the discovery file format and native IPC query contract, the relay envelope layout, and `collab.autoStart` match this contract ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). The embedded client preserves non-UTF-8 byte arrays in bash `details.trace` without rendering shell trace visualizations, and adapts single-message `wait` results from pre-`v18.17.0` OMP hosts.
+
+The canary's rewind matcher accepts upstream's positive `Rewound N turns` status as well as the old text. The pull-request canary that installed npm `latest` (18.20.0) passed every Linux stage and every supported Windows stage, with `branch-rewind` among the stages Windows skips by design, and a release request still runs the canary pinned to its exact version. Neither the matcher change nor that run qualifies a release.
 
 <!-- release-generate:qualification:start -->
 | Surface | Current contract | Qualification |
@@ -267,20 +73,188 @@ start whose relay is unreachable or times out is retried
 | windowsCleanup | Signed candidate v0.11.0-prealpha.1 | Zero instances and firewalls; tailnet node deleted and access vault removed. |
 <!-- release-generate:qualification:end -->
 
-The gateway only reads OMP discovery, polls metadata, and fetches capabilities per launch without
-storing them. The minimum version is an integration contract, not proof that every later release
-or platform has been tested. No fork-era qualification, signed receipt, or endurance result
-transfers to this architecture. Current source/package pins live in `UPSTREAM.lock.json`. Each
-release records a fresh 30-minute relay check; eight-hour endurance is not claimed.
+The gateway reads OMP discovery files, polls metadata snapshots, and resolves capabilities (**View** or **Control** links) per launch without storing them. Satisfying the `>= 18.1.20` minimum version is an integration contract, not proof that an untested OMP version or platform is qualified; no earlier release receipt transfers to a new candidate. Each release records a 30-minute relay check rather than an eight-hour endurance claim.
 
-The Linux ARM64 source-checkout job stages the published platform native package at the
-`UPSTREAM.lock.json` version and runs upstream's `registry.test.ts`, `registry-smoke.test.ts`, and
-`host-registry.test.ts`. It gates only the discovery/query contract consumed by the gateway, not
-unrelated upstream collaboration suites or full repository checks. The required Windows job gates
-gateway contracts, ACLs, and service lifecycle only. Real OMP-to-gateway discovery on Windows is
-exercised by the `canary-windows` lane, which drives stock OMP's named pipe through the unchanged
-reader, and each stable campaign's signed-artifact Windows lane qualifies Windows Server 2025
-x86-64 at interactive logon ([WINDOWS_QUALIFICATION.md](WINDOWS_QUALIFICATION.md), ADR-031).
+In CI, `linux-arm64-source-checkout` stages the Linux arm64 native package at the `UPSTREAM.lock.json` version and runs upstream's three registry suites to gate discovery and queries only ([Linux qualification](LINUX_QUALIFICATION.md)). On Windows, `windows-service-lifecycle` gates gateway contracts, ACLs, and scheduled-task lifecycle, while `canary-windows` exercises stock OMP discovery over named pipes ([Windows qualification](WINDOWS_QUALIFICATION.md)).
+
+## Versioned interfaces
+
+Four compatibility surfaces version independently:
+
+| Surface | Current version | Current behavior |
+|---|---|---|
+| OMP discovery and query | 1, mainline OMP `>= 18.1.20` | Validates consumed discovery and reply fields, ignores unknown additive v1 fields, polls snapshots, and resolves links per launch. |
+| Gateway HTTP API | `/api/v1` | Metadata-only list and SSE, `GET /api/v1/client-config`, generation-bound launch (`409 mode_unavailable`), machine-only `GET /api/v1/notification-feed` (`version: 1`), and opt-in CORS on [the cross-origin routes](PROTOCOL.md#cross-origin-access). |
+| Web Push and fleet notifications | Push `2` and `3`; fleet HTTP `1` | Push `version: 2` for local alerts, and Push `version: 3` with `version: 1` coordinator and grant bodies for [fleet notifications](PROTOCOL.md#fleet-notifications). |
+| Embedded OMP browser client | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md) | Same-page in-memory capability bootstrap; arbitrary client and wire combinations are unsupported. |
+
+Unknown major protocol versions fail closed. Satisfying the host minimum does not replace the pinned browser-client provenance or release qualification.
+
+## Deployment dependency matrix
+
+These deployment rules govern every gateway installation ([Installation and operations](OPERATIONS.md); no Tailscale client version range is qualified):
+
+| Dependency or mode | Current state | Compatibility statement |
+|---|---|---|
+| Tailscale Serve over tailnet HTTPS | Required | Only supported remote path; Tailscale must run in TUN mode so loopback and Serve identity checks hold ([Security §4](SECURITY.md#4-network-exposure)). |
+| User-owned Tailscale source identity | Required in `tailscale-serve` mode | Caller's `Tailscale-User-Login` from Serve must match an exact entry in `auth.allowedLogins`. |
+| Tagged Tailscale source device | Unsupported | Serve omits user identity headers for tagged source nodes, so `tailscale-serve` authentication fails closed with `403`. |
+| Any other forwarder onto the gateway's loopback port | Unsupported | Reverse proxies, tunnels, container publishes, or SSH port forwards to `127.0.0.1:<port>` bypass Serve header overwriting ([Security §4](SECURITY.md#4-network-exposure)). |
+| Existing OMP encrypted relay | Required | Only supported collaboration relay path; relay availability and connection metadata are inherited from OMP's default relay ([Security §5](SECURITY.md#5-relay-exposure)). |
+| Self-hosted or proxied relay | Unsupported | **Deferred** until dedicated long-lived WebSocket endurance and separate security qualification pass. |
+| `dev-localhost` HTTP mode | Development only | Loopback-only local development mode; never a remote, LAN, or production deployment path. |
+| Tailscale Funnel or public reverse tunnel | Unsupported | Public ingress must remain disabled (`doctor` checks `funnelDisabled`). |
+
+The HTTP identity boundary assumes a single-user workstation. Any untrusted local process or separate OS account that can connect to the gateway's loopback port can forge Tailscale Serve identity headers and is outside the support boundary, even though OMP IPC discovery remains current-user and token protected; shared shell hosts and mutually untrusted local accounts are unsupported.
+
+WebAuthn gating of **Control**, a Trusted Web Activity, native Android applications, and server-side multi-host proxying are **Deferred**.
+
+## Status vocabulary
+
+Compatibility statements use seven status terms:
+
+| Term | Meaning |
+|---|---|
+| **Tested** | A named CI lane runs it and stays green on every change or on its stated schedule, proving that lane's scope on hosted runners or browser engines rather than a physical device or signed release. |
+| **Supported** | A platform family the project keeps working and accepts bug reports against, naming its **Tested** lanes and known limits; support never implies qualification. |
+| **Qualified** | The complete applicable release matrix passed on the named version, OS, browser, and deployment path. |
+| **Implemented** | The code path exists and has repository-level automated test coverage. |
+| **Smoke-tested** | A named scenario passed in one recorded environment, without claiming platform support. |
+| **Deferred** | Outside the release target by design. |
+| **Unsupported** | Refused or unsafe as a deployment path. |
+
+An implemented or smoke-tested path does not become **Qualified** until every applicable security, installation, lifecycle, and cleanup check passes; blank version ranges never imply support.
+
+**Tested** and **Supported** never imply **Qualified**, because a green hosted or emulated lane is not a physical-device or signed-release result, and a platform family whose lanes stop running loses **Supported** status ([ADR-030](DECISIONS.md#adr-030--claim-support-for-ci-tested-platform-families-separately-from-qualification)).
+
+The advisory [Percy visual lane](BROWSERSTACK.md#percy-scope) renders 21 synthetic DOM snapshots across three CSS viewports. Visual snapshots are neither functional browser tests nor release qualification, even when a renderer is branded Safari, Edge, iPhone, or Android, and add no **Tested**, **Supported**, or **Qualified** claims.
+
+Cloud-device rows ([ADR-032](DECISIONS.md#adr-032--qualify-iphone-ipad-and-android-browsers-on-real-cloud-devices-in-every-stable-campaign)) are **Qualified** in the browser on a real cloud device: the campaign's `deviceCloud` lane passed on the named device, OS, and browser version in the vendor named for that target, as reported by the device.
+
+In those runs, Tailscale Serve saw the test runner's allowlisted login rather than a user-owned phone's, Home Screen alerts were proven only on a TestingBot iPhone with the device unlocked and the app in the background, and lock, Airplane, Doze, force-stop, and cellular recovery are **Qualified** only on the physical Pixel.
+
+Wider model pools, availability holds, and capability-free allocation probes are **Tested** release-tooling evidence only and add no **Qualified** devices or versions; see [BrowserStack device-cloud fallback](RELEASE.md#browserstack-device-cloud-fallback).
+
+## Protocol evolution
+
+Gateway, registry, and browser-API contracts evolve under strict major-version rules:
+
+- Reject unknown major protocol versions.
+- Add optional fields within a major only when older peers safely ignore them.
+- Never reinterpret a field's security meaning in place.
+- Serve one browser API major version at a time.
+- Record protocol versions in diagnostics without capability values.
+- Document upgrade order and rollback behavior whenever a gateway or OMP host contract changes.
+
+Every published release identifies the exact OMP and `collab-web` source, build command, Bun version, dependency lockfile hash, local patches, license notices, and shipped asset hashes.
+
+## Upstream refresh procedure
+
+Maintainers follow these steps under Bun `1.4.4` when proposing an OMP baseline refresh:
+
+1. Inspect the upstream release tag and collaboration-related source changes.
+2. Run `bun scripts/upstream-pins.ts <version> --write` to write the exact tag, commit, tree, package versions, observation date, and integrity-verified Darwin arm64 and Windows x64 native pins into `UPSTREAM.lock.json` and `scripts/windows-qualification-pins.json`, and record the review notes in `UPSTREAM.lock.json` (the script refuses unsatisfied Bun ranges and missing tracked paths).
+3. Verify the mainline discovery and query contract and minimum host version without creating a downstream OMP patch or fallback transport.
+4. If refreshing the embedded client, update `packages/collab-client` and verify its provenance and license notices ([Source drift report and refresh](../packages/collab-client/README.md#source-drift-report-and-refresh)).
+5. Run discovery, query, protocol, link-parsing, **View**, and **Control** checks ([Test plan](TEST_PLAN.md)).
+6. Run the [upstream canary](LIFECYCLE_BRANCH_RESUME.md#daily-upstream-canary) (`prepare`, `publish`, `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`, `continue`, and `unregister`; Windows skips `new-generation`, `fork`, and `branch-rewind`) and `bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>` on the macOS guest before the campaign, keeping relay-replacement, fatal-failure, and shutdown checks.
+7. Run the capability-leak suite and browser and Android acceptance checks ([Test plan](TEST_PLAN.md)).
+8. Qualify every advertised host installer and deployment path.
+9. Update this document, [`RELEASE_STATUS.md`](RELEASE_STATUS.md), and `CHANGELOG.md`.
+
+Do not mark an OMP version or platform **Qualified** solely because it satisfies the `>= 18.1.20` minimum; record exact CI and qualification evidence for each advertised combination.
+
+## Historical records
+
+Everything under the headings below is dated historical evidence and is kept as written; it does not describe current support or transfer qualification to later releases.
+
+## Exact OMP baseline
+
+**Fork-era evidence:** the table and pin-refresh records below are immutable published-release
+history, not the mainline support matrix above. Any local patch path or lock reference here means
+the file at that historical tag; it no longer describes the shipping prerequisite.
+
+Published releases and unreleased development targets use separate immutable upstream revisions:
+
+| Gateway line | OMP source | Nearest release baseline | OMP package baselines | Collab client | Registry protocol | Claim |
+|---|---|---|---|---|---:|---|
+| `0.3.0`, qualified stable v0.3.0 | `can1357/oh-my-pi@daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` | `v18.1.14` | coding-agent `18.1.14`; wire `18.1.14` | collab-web `16.3.6` from the same source commit, with gateway patches | 1 | Fresh signed v0.3.0-prealpha.3 matrix and endurance; exact patched tree `17f84676442ee103564d01755ed1f76bbc51820e` |
+| `0.3.0`, published as `v0.3.0-prealpha.2` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit, with photo composer patches | 1 | Published engineering prerelease; exact local smoke only |
+| `0.1.0`, published as `v0.1.0-alpha.1` | `can1357/oh-my-pi@858f7dd91fff9b84cf8a2c6a6bb85aa0e6d03a55` | `v17.3.8` | coding-agent `17.3.8`; wire `17.3.8` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit alpha qualification only |
+| `0.1.0`, published as `v0.1.0-beta.1` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit beta qualification through the versioned patched-binary route |
+| `0.1.0`, published as `v0.1.0` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7` through the versioned patched-binary route |
+| `0.2.0`, published as `v0.2.0` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7` through the versioned patched-binary route |
+| `0.2.1`, published as `v0.2.1` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with unchanged patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7`; UI/version point release only |
+
+v17.3.8 remains the immutable alpha baseline; the older beta and stable lines retain exact v17.4.1.
+Stable v0.3.0 independently qualifies the exact patched v18.1.14 pin in `UPSTREAM.lock.json`.
+No loose semver range, stock binary, or arbitrary fork is supported.
+
+**Pin refreshed 2026-08-21, from `v17.3.8` to `v17.4.1`.** The maintained
+`gateway-collaboration` series already targeted the new exact base. The carried health-probe commit
+applied cleanly, and the v17.4.1 QR-command fixture was adapted to exercise manual publication
+recovery. Upstream collab-web, wire, and relay host/client implementation bytes are unchanged;
+package metadata and the out-of-path session-close ordering changed. Earlier platform evidence did
+not transfer automatically: `.20` repeated the beta lanes, and stable candidate `.23` repeated the
+complete signed-artifact, Debian, macOS, physical Pixel, exact patched-OMP publication/revocation,
+relay, leak, and cleanup gates. The command-complete `omp-gateway-patched` route is the qualified
+stable prerequisite; upstreaming and paired OMP packaging remain non-gates.
+
+**Pin refreshed 2026-08-19, from `v17.0.6` / `89d6a8f6d14286f32f09ec9c8aa8af7b3451d2d6`.** The
+previous mbox did not apply at this commit (`interactive-mode.ts`, `agent-session.ts`,
+`session-manager.ts`, and `builtin-registry.ts` all conflicted), so the shipped patch was
+regenerated against `v17.3.8`. The refresh itself carried source-level evidence only: it re-ran the
+documented patch suite and the repository suite, and it re-ran no native host, Tailscale, relay,
+Android, browser, or signed-artifact qualification. Any platform row whose evidence predates
+2026-08-19 is therefore **NOT RUN** for this pin until re-executed, and an unchanged row is never
+coverage of `v17.3.8`.
+
+Historical v0.2.1 qualification used candidate `v0.2.1-prealpha.2`. On 2026-08-28 it passed the
+complete Debian signed-artifact lifecycle including the published `v0.2.0` predecessor
+migration; the complete macOS install, persistence, rollback, and cleanup sequence; exact v17.4.1
+patched-OMP publication/revocation; physical Pixel same-page lock, Airplane, and forced-Doze
+recovery; the seven-sink capability sweep; and the bounded relay smoke. The protected
+28,800-second long-window result transferred within that unchanged historical relay/client/wire
+baseline only; it does not transfer to v0.3.0. The current candidate repeated endurance independently.
+Issue #65 stays open for other process-wide Chrome failures, not as a
+qualification exception for the transitions the candidate actually passed.
+
+The fork-era source paths, versions, observation dates, and upstream findings remain in each
+release tag’s `UPSTREAM.lock.json`. Those historical integrations required:
+
+- the apply-ready OMP controller/auto-start/registry patch in
+  [the fork-era patch directory](https://github.com/alphastorm/omp-session-gateway/tree/v0.3.0/patches/oh-my-pi);
+- the pinned collab-web source integration described by
+  [`packages/collab-client/upstream/UPSTREAM.json`](../packages/collab-client/upstream/UPSTREAM.json);
+- the reviewed in-memory client bootstrap, because upstream collab-web writes a
+  capability to `location.hash`; and
+- exact Bun `1.4.0` for the v0.3.0 qualified build/runtime. Archives declare Bun `>=1.4.0`, but
+  no broader version range is qualified. Historical v0.2.1 remains specific to Bun `1.3.14`.
+
+## Host and client matrix
+
+**Fork-era evidence only:** every result and support label in this historical matrix belongs to
+the named patched-OMP artifacts. It does not qualify the mainline prerequisite.
+
+The following describes code, evidence, and each row's support boundary. Debian 13 x86-64, macOS
+26.6.1 arm64, and Chrome 152.0.7977.75 on the Android 17 Pixel have exact `v0.3.0-prealpha.3`
+qualification. Historical evidence never substitutes for this result.
+Windows passes persistent source acceptance through reboot-to-interactive-login and the complete
+gateway/OMP path, but remains unadvertised until signed Windows gateway and patched-OMP artifacts
+repeat it. This Windows-only gap does not block the narrower stable matrix. Desktop Chromium is
+smoke only.
+
+| Platform | Implemented path | Recorded evidence | Qualification | Support claim |
+|---|---|---|---|---|
+| Linux host | User-only Unix-domain socket; systemd user service | Signed `v0.3.0-prealpha.3` passed the complete Debian 13 x86-64 lifecycle in [run 34258230589](https://github.com/alphastorm/omp-session-gateway/actions/runs/34258230589): install/readiness, permissions, rotation, diagnostics, v0.2.1 upgrade/rollback, identity denial, persistence, refusal-safe uninstall, cleanup, and disposable-host teardown. Exact patched OMP v18.1.14 built and published. | Qualified with TUN-mode Tailscale Serve; no other Linux release, architecture, or init-system claim. | Stable v0.3.0: Debian 13 x86-64 only |
+| macOS host | User-only Unix-domain socket; LaunchAgent | Signed `v0.3.0-prealpha.3` on Mac14,3 / macOS 26.6.1 arm64 passed exact archive/native-addon checks, private install, doctor 17/17, rotation/persistence, control-plane restart, v0.2.1 rollback 20/20, identity/exposure, exact patched OMP v18.1.14 build/publication/revocation, uninstall, Serve reset, and zero-process/listener cleanup. | Qualified only for macOS 26.6.1 arm64 on Mac14,3 with TUN-mode Tailscale Serve; interactive-login startup. | Stable v0.3.0: named macOS combination only |
+| Windows host | Current-user named pipe and Scheduled Task with `LogonTrigger` + `InteractiveToken`; paired OMP publisher uses nonce-bound mutual HMAC before releasing capabilities | Hosted run `29791906104` passed publisher mutual authentication, ACLs, cross-user denial, service lifecycle, rotation, and uninstall. A persistent Windows Server 2025 source lane on 2026-08-21 then passed exact-source install in 77,498 ms, reboot with task installed but no pre-login listener, automatic first-RDP-login startup without `/Run`, config/token continuity, rotation, active upgrade, history-selected rollback, TUN-mode Serve, `doctor` 17/17, and clean uninstall. Exact patched OMP `v17.4.1` built on the host, auto-published View and Control, returned `200 no-store` launches, denied a mismatched generation `409`, and revoked within 374 ms after forced exit. | **PARTIAL for release.** The persistent source lane accepts #90 and the reboot/login contract, but its gateway archive and OMP binary were unsigned. A Windows-only hang in the complete `read-only.test.ts` fixture also remains to be dispositioned; the publisher suite passed 13/13 and production publication/revocation passed. Repeat the entire lane with paired signed artifacts. | None; Windows remains unadvertised. If later promoted, the promise is “starts at interactive login,” not unattended boot. |
+| Android client | Installable HTTPS PWA through Tailscale Serve | Pixel 10 Pro / Android 17 build CP2A.260805.005 / Chrome 152.0.7977.75 loaded signed candidate asset `/assets/app.32115375c6b5.js`. View/read-only, Control, and prompt acknowledgement passed. Same-page lock (9,451 ms), Airplane (8,481 ms), and forced Doze (8,799 ms) recovered without a reload; all seven forbidden capability sinks were detectable and clean. | Qualified only for the named device/OS/browser. Issue #65 remains a process-wide Chrome limitation outside the proven transitions. | Stable v0.3.0: named Pixel combination only |
+| Desktop Chromium | Development/smoke client | Serve access as the current node's allowed identity, loopback-backend identity rejection, three real OMP cards, View/Control/interrupt, SSE, URL scrub, browser-store/cache checks, process removal, foreground/online reconnect, and live `/new` generation revocation (`409` for the stale generation) passed | Not a release target, and never a substitute for physical Android qualification: emulating a device's viewport and pixel ratio is not a result from that device. The denied-identity evidence in this document comes from a tagged droplet and the physical Pixel, not from desktop Chromium. | Smoke only |
+
+At those fork-era releases, no other Linux init system, macOS deployment mode, Windows service
+mechanism, iOS browser, Firefox, Safari, or Chromium derivative had a compatibility claim. Current
+platform and browser support is in [Platforms and browsers](#platforms-and-browsers).
 
 ## Fork-era published-release history
 
@@ -374,171 +348,9 @@ the browser may substitute a generic background-update notification. Open or ref
 after upgrading before relying on stop alerts.
 This does not qualify physical background delivery or imply successful task completion.
 
-## Status vocabulary
+## Fork-era deployment evidence
 
-Compatibility statements use these terms deliberately:
-
-| Term | Meaning |
-|---|---|
-| **Tested** | A named CI lane runs it and is green, on every change or on its stated schedule. It proves that lane's scope on hosted runners or browser engines, not a physical device or a signed release. |
-| **Supported** | A platform family the project keeps working and accepts bug reports against. Each supported family names the Tested lanes that cover it and its known limits; support never implies qualification. |
-| **Qualified** | The complete applicable release matrix passed on the named version, OS, browser, and deployment path. |
-| **Implemented** | The relevant code path exists and has repository-level automated coverage. |
-| **Smoke-tested** | A named scenario passed in one recorded environment. This is not a platform support claim. |
-| **Deferred** | Intentionally outside the current release target. |
-| **Unsupported** | Must not be presented as a working deployment path. |
-
-An implemented or smoke-tested row remains unqualified until every applicable security,
-installation, lifecycle, and cleanup scenario passes. Blank version ranges never imply support.
-Tested and supported never become qualified: a green hosted or emulated lane is not a
-physical-device or signed-release result. A family whose lanes stop running loses its support
-status (ADR-030).
-
-The advisory [Percy visual lane](BROWSERSTACK.md#percy-scope) re-renders 18 synthetic DOM
-snapshots at three CSS viewports. Visual snapshots are neither functional browser tests nor
-qualification, even when a renderer is branded Safari, Edge, iPhone or Android. They do not add
-Tested functional coverage, Supported families or Qualified rows to the matrices above.
-
-Real-device cloud rows (ADR-032) are qualified **in the browser on a cloud device**: the stable
-campaign's `deviceCloud` lane passed on the named real device, OS, and browser version in
-the vendor named for that target, each as the device itself reported it. The limits are part of that claim.
-Tailscale Serve saw the orchestrator's allowlisted login, not the phone's own; alerts were proven
-with the device unlocked and the app in the background; and lock, Airplane, Doze, force-stop, and
-cellular behavior are qualified only on the Pixel.
-
-Shared-device availability is infrastructure, not a candidate pass or defect. A valid pinned
-pool with no free eligible device produces a failed attempt with closed availability-hold
-evidence (CLI exit 75); auth, transport, audit and cleanup failures remain diagnostic. Wider
-model pools and capability-free allocation probes are Tested tooling evidence only. They add
-no qualified devices or versions to the signed-release tables above.
-
-New device-cloud receipts attribute vendor and tunnel version to each target. TestingBot remains
-the only iPhone vendor and the only cloud Home Screen/background-alert proof. iPad Safari and
-Samsung Chrome may use BrowserStack when their TestingBot pool is empty; mixed receipts never
-attribute BrowserStack's devices to TestingBot. Android remains Samsung-only, with a corroborated
-hardware code. Legacy homogeneous receipts retain their original summaries. The 2026-10-20
-BrowserStack public-page allocations (iPad 10th/Safari 27.0 and Galaxy S26 SM-S942B/Android
-16.0.0/Chrome 152.0.7977.54) are Tested allocation and retention evidence only, not qualification
-of these versions or completion of the collaboration journey.
-A later capability-free BrowserStack S26 probe on 2026-10-20 also observed `SM-S942U1`, as allocation evidence only.
-
-## Exact OMP baseline
-
-**Fork-era evidence:** the table and pin-refresh records below are immutable published-release
-history, not the mainline support matrix above. Any local patch path or lock reference here means
-the file at that historical tag; it no longer describes the shipping prerequisite.
-
-Published releases and unreleased development targets use separate immutable upstream revisions:
-
-| Gateway line | OMP source | Nearest release baseline | OMP package baselines | Collab client | Registry protocol | Claim |
-|---|---|---|---|---|---:|---|
-| `0.3.0`, qualified stable v0.3.0 | `can1357/oh-my-pi@daf07999c2fee9b22edc7bf8fea1fb6272e0df5e` | `v18.1.14` | coding-agent `18.1.14`; wire `18.1.14` | collab-web `16.3.6` from the same source commit, with gateway patches | 1 | Fresh signed v0.3.0-prealpha.3 matrix and endurance; exact patched tree `17f84676442ee103564d01755ed1f76bbc51820e` |
-| `0.3.0`, published as `v0.3.0-prealpha.2` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit, with photo composer patches | 1 | Published engineering prerelease; exact local smoke only |
-| `0.1.0`, published as `v0.1.0-alpha.1` | `can1357/oh-my-pi@858f7dd91fff9b84cf8a2c6a6bb85aa0e6d03a55` | `v17.3.8` | coding-agent `17.3.8`; wire `17.3.8` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit alpha qualification only |
-| `0.1.0`, published as `v0.1.0-beta.1` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit beta qualification through the versioned patched-binary route |
-| `0.1.0`, published as `v0.1.0` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7` through the versioned patched-binary route |
-| `0.2.0`, published as `v0.2.0` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7` through the versioned patched-binary route |
-| `0.2.1`, published as `v0.2.1` | `can1357/oh-my-pi@9350b7990d26ebf69a604edc82d8558ef04adf30` | `v17.4.1` | coding-agent `17.4.1`; wire `17.4.1` | collab-web `16.3.6` from the same source commit | 1 | Exact-commit stable qualification with unchanged patch tree `a5cfc80fcc0df1ca6e430c125371bcae43d5e5f7`; UI/version point release only |
-
-v17.3.8 remains the immutable alpha baseline; the older beta and stable lines retain exact v17.4.1.
-Stable v0.3.0 independently qualifies the exact patched v18.1.14 pin in `UPSTREAM.lock.json`.
-No loose semver range, stock binary, or arbitrary fork is supported.
-
-**Pin refreshed 2026-08-21, from `v17.3.8` to `v17.4.1`.** The maintained
-`gateway-collaboration` series already targeted the new exact base. The carried health-probe commit
-applied cleanly, and the v17.4.1 QR-command fixture was adapted to exercise manual publication
-recovery. Upstream collab-web, wire, and relay host/client implementation bytes are unchanged;
-package metadata and the out-of-path session-close ordering changed. Earlier platform evidence did
-not transfer automatically: `.20` repeated the beta lanes, and stable candidate `.23` repeated the
-complete signed-artifact, Debian, macOS, physical Pixel, exact patched-OMP publication/revocation,
-relay, leak, and cleanup gates. The command-complete `omp-gateway-patched` route is the qualified
-stable prerequisite; upstreaming and paired OMP packaging remain non-gates.
-
-**Pin refreshed 2026-08-19, from `v17.0.6` / `89d6a8f6d14286f32f09ec9c8aa8af7b3451d2d6`.** The
-previous mbox did not apply at this commit (`interactive-mode.ts`, `agent-session.ts`,
-`session-manager.ts`, and `builtin-registry.ts` all conflicted), so the shipped patch was
-regenerated against `v17.3.8`. The refresh itself carried source-level evidence only: it re-ran the
-documented patch suite and the repository suite, and it re-ran no native host, Tailscale, relay,
-Android, browser, or signed-artifact qualification. Any platform row whose evidence predates
-2026-08-19 is therefore **NOT RUN** for this pin until re-executed, and an unchanged row is never
-coverage of `v17.3.8`.
-
-Historical v0.2.1 qualification used candidate `v0.2.1-prealpha.2`. On 2026-08-28 it passed the
-complete Debian signed-artifact lifecycle including the published `v0.2.0` predecessor
-migration; the complete macOS install, persistence, rollback, and cleanup sequence; exact v17.4.1
-patched-OMP publication/revocation; physical Pixel same-page lock, Airplane, and forced-Doze
-recovery; the seven-sink capability sweep; and the bounded relay smoke. The protected
-28,800-second long-window result transferred within that unchanged historical relay/client/wire
-baseline only; it does not transfer to v0.3.0. The current candidate repeated endurance independently.
-Issue #65 stays open for other process-wide Chrome failures, not as a
-qualification exception for the transitions the candidate actually passed.
-
-The fork-era source paths, versions, observation dates, and upstream findings remain in each
-release tag’s `UPSTREAM.lock.json`. Those historical integrations required:
-
-- the apply-ready OMP controller/auto-start/registry patch in
-  [the fork-era patch directory](https://github.com/alphastorm/omp-session-gateway/tree/v0.3.0/patches/oh-my-pi);
-- the pinned collab-web source integration described by
-  [`packages/collab-client/upstream/UPSTREAM.json`](../packages/collab-client/upstream/UPSTREAM.json);
-- the reviewed in-memory client bootstrap, because upstream collab-web writes a
-  capability to `location.hash`; and
-- exact Bun `1.4.0` for the v0.3.0 qualified build/runtime. Archives declare Bun `>=1.4.0`, but
-  no broader version range is qualified. Historical v0.2.1 remains specific to Bun `1.3.14`.
-
-Builds from current `main` and the next release archives require Bun `>=1.4.4`. Published v0.9.0
-retains its original Bun qualification; the next candidate must requalify every lane under 1.4.4
-before any new qualified claim.
-
-## Versioned interfaces
-
-Three compatibility surfaces change independently:
-
-| Surface | Current version | Current behavior |
-|---|---|---|
-| Gateway client of OMP discovery/query | 1, mainline OMP `>= 18.1.20` | Validates consumed discovery and reply fields and ignores unknown additive v1 fields; snapshot polling and per-launch link resolution. |
-| PWA to gateway HTTP API | `/api/v1` | Metadata-only list/SSE, `GET /api/v1/client-config`, generation-bound launch plus `409 mode_unavailable`, and opt-in exact-origin CORS (`http.trustedDashboardOrigins`) on `/api/v1/sessions` and `/api/v1/sessions/:instanceId/launch`. |
-| Pinned OMP browser client | Exact source/provenance in the client lock | In-memory bootstrap; not a claim to support arbitrary client/wire combinations. |
-
-There is no gateway-owned publisher protocol and no cross-version publisher fallback. Unknown
-protocol majors fail closed. The host minimum does not supersede the pinned browser-client
-provenance or the need for exact release qualification.
-
-## Host and client matrix
-
-**Fork-era evidence only:** every result and support label in this historical matrix belongs to
-the named patched-OMP artifacts. It does not qualify the mainline prerequisite.
-
-The following describes code, evidence, and each row's support boundary. Debian 13 x86-64, macOS
-26.6.1 arm64, and Chrome 152.0.7977.75 on the Android 17 Pixel have exact `v0.3.0-prealpha.3`
-qualification. Historical evidence never substitutes for this result.
-Windows passes persistent source acceptance through reboot-to-interactive-login and the complete
-gateway/OMP path, but remains unadvertised until signed Windows gateway and patched-OMP artifacts
-repeat it. This Windows-only gap does not block the narrower stable matrix. Desktop Chromium is
-smoke only.
-
-| Platform | Implemented path | Recorded evidence | Qualification | Support claim |
-|---|---|---|---|---|
-| Linux host | User-only Unix-domain socket; systemd user service | Signed `v0.3.0-prealpha.3` passed the complete Debian 13 x86-64 lifecycle in [run 34258230589](https://github.com/alphastorm/omp-session-gateway/actions/runs/34258230589): install/readiness, permissions, rotation, diagnostics, v0.2.1 upgrade/rollback, identity denial, persistence, refusal-safe uninstall, cleanup, and disposable-host teardown. Exact patched OMP v18.1.14 built and published. | Qualified with TUN-mode Tailscale Serve; no other Linux release, architecture, or init-system claim. | Stable v0.3.0: Debian 13 x86-64 only |
-| macOS host | User-only Unix-domain socket; LaunchAgent | Signed `v0.3.0-prealpha.3` on Mac14,3 / macOS 26.6.1 arm64 passed exact archive/native-addon checks, private install, doctor 17/17, rotation/persistence, control-plane restart, v0.2.1 rollback 20/20, identity/exposure, exact patched OMP v18.1.14 build/publication/revocation, uninstall, Serve reset, and zero-process/listener cleanup. | Qualified only for macOS 26.6.1 arm64 on Mac14,3 with TUN-mode Tailscale Serve; interactive-login startup. | Stable v0.3.0: named macOS combination only |
-| Windows host | Current-user named pipe and Scheduled Task with `LogonTrigger` + `InteractiveToken`; paired OMP publisher uses nonce-bound mutual HMAC before releasing capabilities | Hosted run `29791906104` passed publisher mutual authentication, ACLs, cross-user denial, service lifecycle, rotation, and uninstall. A persistent Windows Server 2025 source lane on 2026-08-21 then passed exact-source install in 77,498 ms, reboot with task installed but no pre-login listener, automatic first-RDP-login startup without `/Run`, config/token continuity, rotation, active upgrade, history-selected rollback, TUN-mode Serve, `doctor` 17/17, and clean uninstall. Exact patched OMP `v17.4.1` built on the host, auto-published View and Control, returned `200 no-store` launches, denied a mismatched generation `409`, and revoked within 374 ms after forced exit. | **PARTIAL for release.** The persistent source lane accepts #90 and the reboot/login contract, but its gateway archive and OMP binary were unsigned. A Windows-only hang in the complete `read-only.test.ts` fixture also remains to be dispositioned; the publisher suite passed 13/13 and production publication/revocation passed. Repeat the entire lane with paired signed artifacts. | None; Windows remains unadvertised. If later promoted, the promise is “starts at interactive login,” not unattended boot. |
-| Android client | Installable HTTPS PWA through Tailscale Serve | Pixel 10 Pro / Android 17 build CP2A.260805.005 / Chrome 152.0.7977.75 loaded signed candidate asset `/assets/app.32115375c6b5.js`. View/read-only, Control, and prompt acknowledgement passed. Same-page lock (9,451 ms), Airplane (8,481 ms), and forced Doze (8,799 ms) recovered without a reload; all seven forbidden capability sinks were detectable and clean. | Qualified only for the named device/OS/browser. Issue #65 remains a process-wide Chrome limitation outside the proven transitions. | Stable v0.3.0: named Pixel combination only |
-| Desktop Chromium | Development/smoke client | Serve access as the current node's allowed identity, loopback-backend identity rejection, three real OMP cards, View/Control/interrupt, SSE, URL scrub, browser-store/cache checks, process removal, foreground/online reconnect, and live `/new` generation revocation (`409` for the stale generation) passed | Not a release target, and never a substitute for physical Android qualification: emulating a device's viewport and pixel ratio is not a result from that device. The denied-identity evidence in this document comes from a tagged droplet and the physical Pixel, not from desktop Chromium. | Smoke only |
-
-At those fork-era releases, no other Linux init system, macOS deployment mode, Windows service
-mechanism, iOS browser, Firefox, Safari, or Chromium derivative had a compatibility claim. Current
-platform and browser support is in [Platforms and browsers](#platforms-and-browsers).
-
-The v1 HTTP identity boundary assumes a user-controlled workstation. Any untrusted process or
-different OS account that can connect to the desktop's loopback port can forge the non-cryptographic
-Serve identity headers and is therefore outside the support boundary. Shared shell hosts and
-mutually untrusted local accounts are unsupported even though IPC publication itself remains
-current-user/token protected.
-
-## Deployment dependency matrix
-
-**Fork-era evidence only:** measured results below retain their original scope. The current
-Tailscale-only policy is unchanged, but the mainline candidate must repeat qualification; even
-unchanged browser or relay behavior does not inherit these passes.
+Measured results below retain their original fork-era scope and do not transfer to mainline releases:
 
 | Dependency or mode | Current state | Compatibility statement |
 |---|---|---|
@@ -551,53 +363,37 @@ unchanged browser or relay behavior does not inherit these passes.
 | `dev-localhost` HTTP mode | Development only | Never a remote, LAN, or production deployment path. |
 | Tailscale Funnel or public reverse tunnel | Unsupported | Must not be enabled or documented as a normal deployment path. |
 
-WebAuthn control gating, a Trusted Web Activity, native Android applications, server-side
-multi-host proxying, and fleet-wide push remain deferred. Background Web Push is qualified on the Pixel by each stable
-campaign's background-Push lane (ADR-031): the exact-version closed-app, lock-screen,
-tap-to-current-Control, stale-generation, force-stop, network-change, Doze, and forbidden-sink
-matrix, with force-stop and Doze recorded as observed variants. From v0.6.2, the real-device cloud
-lane (ADR-032) adds a narrower iPhone check: Home Screen install, alerts enabled with a real tap,
-delivery with the app in the background, and the tap into Control. Other browsers and devices
-remain unqualified for background alerts.
+## Tern execution observations
 
-## Upstream refresh procedure
+### 2026-10-22 developer-workstation Tern smoke
 
-For every proposed OMP update:
+Developer-workstation execution inside Tern was **smoke-tested on 2026-10-22** (not CI, not release qualification) on macOS (Apple silicon) with Tern `0.9.5` (build `2863c37`), stock OMP `18.12.6` (Homebrew install, one patch release above the `v18.12.5` engineering host baseline pin), `~/.omp` (`PI_CONFIG_DIR` unset), `~/.omp/run/collab-hosts`, `collab.autoStart = control`, and two `dev-localhost` gateways in desktop Chrome:
+two fresh sessions started with `tern new tab --cwd <dir> -- env OMP_SKIP_SETUP=1 omp …` published within ~13 s while `OmpHostReader` observed all three Tern-hosted hosts (`access: control`, `relayConnected: true`) and ignored ~220 stale publications;
+the home PWA showed `All hosts` / `Home` / `Remote` with six independent rows for the three colliding Tern `instanceId`s, launched home **View** and remote **View**/**Control** via `OPTIONS …/launch` `204` + `POST …/launch` `200` with no credentials, echoed a synthetic prompt (`401`), routed and answered a real metadata-only ask (`inputRequired: true` → `false`), isolated a stopped remote gateway (`Remote: Cannot reach this host from this app.` with **Retry** and `Host coverage incomplete — Unavailable: Remote`), and exercised keyboard-dictation help plus the opt-in speech flow via an injected fake `SpeechRecognition` constructor (no microphone used).
+Still pending and not exercised: any phone or installed PWA, the HTTPS Tailscale Serve path (identity headers and real CORS over Serve), Wi-Fi/cellular transitions, session replacement/reconnect/shutdown while inside Tern beyond closing the panes, native browser speech recognition on any device, and Pixel or iPhone keyboard dictation; issue [#380](https://github.com/carrythroughsystems/omp-session-gateway/issues/380)'s installed-iPhone acceptance is therefore not satisfied yet ([TEST_PLAN.md](TEST_PLAN.md#g-tern-multi-host-federation-and-speech-input-acceptance-matrix)).
 
-1. Inspect the new release/tag and collaboration-related source changes.
-2. Run `bun scripts/upstream-pins.ts <version> --write` to derive the exact tag, commit, tree,
-   package versions, observation date, and integrity-verified Darwin arm64 and Windows x64
-   native pins into `UPSTREAM.lock.json` and `scripts/windows-qualification-pins.json`. It
-   refuses a Bun range the pin does not satisfy and any relevant path missing at the tag. Record
-   the findings in the lock notes.
-3. Check the supported mainline discovery/query contract and minimum host version; do not create a
-   downstream OMP patch or fallback transport.
-4. Rebuild the pinned collab-web integration and verify its provenance and license notices.
-5. Run discovery/query, protocol, link parsing, View, and Control verification.
-6. Run the [upstream canary](LIFECYCLE_BRANCH_RESUME.md#daily-upstream-canary): `prepare`, `publish`,
-   `snapshot`, `stale-generation`, `view`, `control`, `new-generation`, `fork`, `branch-rewind`,
-   `continue`, and `unregister`. The `prepare` pre-flight stage resolves the installed package
-   manifest version, checks the running Bun against `engines.bun`, verifies the stock binary,
-   and queries its version before `publish`. Windows runs `continue` but skips exactly the three
-   keystroke stages. Prove the retained-Mac `ompPublication` lifecycle step with
-   `bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>`
-   before the campaign; require its additive lifecycle evidence in that campaign. Keep
-   relay-replacement, fatal-failure, and shutdown checks; these stages do not stand in for them.
-7. Run the complete capability-leak suite and real browser/Android acceptance.
-8. Qualify every advertised host installer and deployment path.
-9. Update this matrix, [`RELEASE_STATUS.md`](RELEASE_STATUS.md), and the changelog.
+<a id="tern-window-selector-compatibility-observation"></a>
+### 2026-11-07 Tern window-selector compatibility observation
 
-Do not call an additional OMP version or platform qualified merely because it satisfies the
-`>= 18.1.20` minimum; record exact CI and acceptance evidence for each advertised combination.
+Read-only installed-CLI probes on two macOS hosts confirmed Tern `0.9.12`
+(`e498b49`). On the two-window host, `inspect --json --window KEY` scopes both
+`sessions[]` and `panes[]`; unknown slots make `inspect` and `ls` exit `1` without stdout.
+Existing OMP panes retain matching block/pane IDs and nonempty `omp_session_file` metadata.
+The sanitized selected-window fixture exercises the existing bounded, lossless parser.
 
-## Protocol evolution
+Optional administrator-owned `tern.window` selects `""` (first window) or decimal slots
+`"2"`–`"999"` for creation and every inspection. Absence leaves argv unchanged. Keys are
+reassignable slots, not stable window identities; no fallback or selector-free retry is
+permitted. See the [ADR-043 amendment](DECISIONS.md#2026-11-07-amendment--administrator-selected-tern-window-slots).
+These observations are **not** an effectful two-window creation smoke, platform support
+expansion, or release qualification; the effectful smoke remains pending.
 
-- Reject unknown major protocol versions.
-- Add optional fields within a major only when old peers safely ignore them.
-- Never reinterpret a field's security meaning in place.
-- Emit one browser API major at a time.
-- Record protocol versions in diagnostics without capability values.
-- Document upgrade order and rollback behavior when the gateway and mainline host contract changes.
+## Device-cloud allocation observations
 
-Every published release must identify the exact OMP and collab-web source, build command,
-Bun version, dependency lockfile hash, local patches, license notices, and shipped asset hashes.
+### 2026-10-20 BrowserStack allocation probes
+
+The 2026-10-20
+BrowserStack public-page allocations (iPad 10th/Safari 27.0 and Galaxy S26 SM-S942B/Android
+16.0.0/Chrome 152.0.7977.54) are Tested allocation and retention evidence only, not qualification
+of these versions or completion of the collaboration journey.
+A later capability-free BrowserStack S26 probe on 2026-10-20 also observed `SM-S942U1`, as allocation evidence only.

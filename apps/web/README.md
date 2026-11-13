@@ -1,258 +1,122 @@
 # `apps/web`
 
-Implementation of the **OMP Sessions** dashboard PWA.
+This package gives contributors the source layout, browser storage ownership, service-worker caching rules, UI controllers, and test commands for the **OMP Sessions** Progressive Web App (PWA). Paths under `src/`, `test/`, `e2e/`, `visual/`, and `playwright*.config.ts` are relative to `apps/web/`; paths under `scripts/`, `docs/`, `packages/`, `assets/`, `licenses/`, and `THIRD_PARTY_NOTICES.md` are relative to the repository root.
 
-Implemented states:
+The PWA renders session metadata and launches the pinned Oh My Pi (OMP) collaboration client in memory; a View or Control link is a bearer secret, called a capability in the contracts.
 
-- authenticated live session list;
-- empty state with gateway/OMP setup guidance;
-- desktop offline or unreachable;
-- unauthorized identity;
-- SSE reconnect and snapshot recovery, retaining stale metadata only in page memory on transport failure;
-- request-specific attention queue, device-local Hold for desk and reversible Hide;
-- View and Control launch actions through the pinned client's same-document, in-memory bootstrap;
-- stale generation/request, unavailable role, expired session, and process-ended errors;
-- explicit Settings-based Push v2 opt-in with Private/Session/Preview detail and exact-request routing;
-- one native tray system for Background alerts, Alert detail, Troubleshooting, request Options,
-  paused-on-interaction Undo, and requests that expand into the same live session;
-- resumable, skippable first-run trays: Connected, Background alerts, View or Control;
-- one-shot all-clear arrival when the last queued/held request clears or ends, with an
-  answered/all-clear check draw-in inside the session shell;
-- privacy/security guidance.
-- opt-in **New session** trays for host, approved project/working copy/profile, review, and
-  creation tracking; **Create and open Control** adopts the new OMP session through its ordinary
-  discovery and generation-bound launch, never a native Tern handoff.
+The dashboard never prefetches capabilities, stores them, or implements the collaboration protocol; user flows are in [Using OMP Sessions](../../docs/USAGE.md), visual tokens in [Brand and UI specification](../../docs/BRANDING.md), and runtime invariants in [OMP Sessions PWA](../../docs/ARCHITECTURE.md#14-omp-sessions-pwa).
 
-Background alerts (Web Push) are opt-in per device from the Settings tray; see
-[Compatibility](../../docs/COMPATIBILITY.md#platforms-and-browsers) for exact qualified
-combinations and evidence. Passkey enrollment and per-Control WebAuthn verification are not
-implemented.
+## Module map
 
-Service workers never navigate open pages during activation or notification clicks: activating a
-new worker claims clients in place (`clients.claim()`), and each open page reloads itself only when
-it is idle with no pending launch, routed notification, or mounted collaboration client.
+| Module | Responsibility |
+|---|---|
+| `src/app.ts` | Directory state machine, SSE and snapshot reconciliation, generation-bound launch and collaboration shell, first-run introduction, and **Background alerts** / **Hosts** settings UI. |
+| `src/availability.ts` | Pure eight-state source availability (`sourceAvailability`) and multi-host scope coverage summaries (`scopeCoverage`). |
+| `src/fleet.ts` | DOM-free `GET /api/v1/client-config` bootstrap, browser-direct CORS polling (`FleetTransport`), fleet grant and recipient calls (`FleetNotificationTransport`), creation calls (`SessionCreationTransport`), and `localStorage` codecs. |
+| `src/fleet-worker-store.ts` | Service-worker IndexedDB store (`FleetWorkerStore`, database `omp-notification-ordering`, 2,000 ms open timeout) with in-memory fallback for Push v2 and Push v3 ordering and tombstones. |
+| `src/icons.ts` | Inline SVG icon factory (`createIcon`) on a 20 px grid with normalized `pathLength="1"` strokes. |
+| `src/service-worker.ts` | Versioned shell and lazy-font caching, Push v2 and Push v3 reduction and app-badge updates, in-page notification click routing (`routeInPage`), and navigation-free activation. |
+| `src/session-creation.ts` | `SessionCreationController` wizard trays, 120-second status watching, 1-hour explicit `POST` replay, and memory-only **First task** draft holder. |
+| `src/tray.ts` | `createTray` controller over `<dialog id="tray" closedby="closerequest">`: up-to-three-panel modal stack, non-modal **Undo** status row, grip drag, height transitions, and request-tray promotion. |
 
-The dashboard receives metadata only. It must not render transcripts, prefetch capabilities, or implement the OMP collaboration protocol.
+`src/index.html`, `src/styles.css`, `src/manifest.webmanifest`, and `src/fonts/` supply the HTML shell, Signal stylesheet, web app manifest, and vendored font subsets compiled by `scripts/build-web.ts`.
 
-The service worker precaches only immutable, versioned application-shell assets, which include the
-two upright text faces. Content-hashed, first-party-served Symbols Nerd Font Mono chunks cover only
-Private Use Area glyphs; they and the italic text face are downloaded lazily, cached on first use
-in the shell cache, and served cache-first thereafter. It must bypass `/api/`, `/client/`, launch
-responses, and collaboration navigation.
-Use no third-party runtime scripts, remote fonts, analytics, or CDNs.
+## Browser storage
+
+Every persistent browser record is metadata-only and holds no capability.
+
+| Key or database | Owner | Contents (holds no capability) | Bound |
+|---|---|---|---|
+| `omp.sessions.held-asks.v2` (`localStorage`) | `src/fleet.ts`, `src/app.ts` | `{ sourceId, sourceOrigin, instanceId, requestId, heldAt }` array; no capability, title, path, model, prompt, or transcript. | 100 records, 512,000 UTF-16 chars |
+| `omp.sessions.dismissed.v2` (`localStorage`) | `src/fleet.ts`, `src/app.ts` | `{ sourceId, sourceOrigin, instanceId, generation, dismissedAt }` array; no capability, title, path, model, prompt, or transcript. | 100 records, 512,000 UTF-16 chars |
+| `omp.sessions.held-asks.v1`, `omp.sessions.dismissed.v1` (`localStorage`) | `src/fleet.ts` (`readSourceRecords`) | Pre-fleet local triage records with no capability; migrated to `sourceId: "local"` and deleted only after `.v2` write succeeds. | 100 records, 512,000 chars on read |
+| `omp.sessions.first-run.v1` (`localStorage`) | `src/app.ts` (`readFirstRunStep`) | `{ "version": 1, "step": "alerts" \| "modes" \| "done", "updatedAt": "<ISO timestamp>" }`; no capability, session ID, or permission state. | 128 UTF-16 chars |
+| `omp.sessions.creation-prefs.v1` (`localStorage`) | `src/fleet.ts`, `src/session-creation.ts` | `{ version: 1, choices: [{sourceId, sourceOrigin, projectId, workingCopyId, profileId, updatedAt}] }`; no capability, operation ID, path, or **First task**. | 8 records, 16 KiB (`16,384` bytes) |
+| `omp-notification-ordering` (`IndexedDB`, store `state`, key `"worker"`) | `src/fleet-worker-store.ts`, `packages/protocol` | `FleetWorkerState` counters, sequences, and per-session or per-request integer maps (`marks`, `touched`, `tombstones`, `shown`, `asks`); no capability, title, path, or push body. | 2,048 entries per map, 30-minute tombstones |
+
+Returning to step 1 (**Connected**) of the three-step introduction (**Connected**, **Background alerts**, **View or Control**) removes `omp.sessions.first-run.v1`, while **Skip introduction** or **Done** writes `done`.
+
+Source-bound `localStorage` records for removed or origin-rebound hosts are pruned only after an authoritative `client-config` bootstrap, never during bootstrap or transport failures; corrupt or inaccessible records fall back cleanly (`done` for first-run, empty or in-memory decisions elsewhere).
+
+## Service worker
+
+`scripts/build-web.ts` compiles `src/service-worker.ts` with a content-hashed cache name (`omp-sessions-shell-<sha256-12>`) and two asset allowlists:
+
+- On `install`, `__SHELL_ASSETS__` precaches hashed `app.<hash>.js`, `app.<hash>.css`, `collab-client.<hash>.js`, `collab-client.<hash>.css`, and the upright Geist and Geist Mono WOFF2 faces.
+- On first fetch, `__LAZY_ASSETS__` caches content-hashed Symbols Nerd Font Mono WOFF2 chunks (Private Use Area `unicode-range` subsets) and the italic Geist WOFF2 face in the active shell cache, serving them cache-first thereafter.
+- On `fetch`, the worker bypasses non-`GET` requests, document navigations (`request.mode === "navigate"`), cross-origin requests, URLs with a query string, `/api/`, `/client/`, `/collab/`, `/internal/`, and any pathname outside those two allowlists.
+
+Activation deletes older `omp-sessions-shell-*` caches and calls `clients.claim()` without navigating open windows; idle pages reload themselves after 1 second ([Shell updates and caching](../../docs/ARCHITECTURE.md#shell-updates-and-caching)). Runtime assets are strictly first-party, with no remote fonts, analytics, third-party scripts, or CDNs.
 
 ## Appearance
 
-`styles.css` implements the "Signal" system from [`docs/BRANDING.md`](../../docs/BRANDING.md)
-(ADR-049): a monochrome chassis in which color exists only as state. Its tokens are declared once
-on `:root`, dark by default and overridden under `prefers-color-scheme: light`; there is no theme
-toggle or stored preference. The pinned collaboration client is themed from outside: the gateway
-sets the client's `--gateway-*` palette on `.gateway-shell` and inserts the client stylesheet ahead
-of its own, so gateway rules win every tie against the client's global reset. Token names are
-disjoint from the client's, and the stylesheet never relies on user-agent margins. Icons are drawn
-by `icons.ts` on one 20px grid; no text glyph stands in for an icon.
+`src/styles.css` implements the Signal tokens from [Brand and UI specification](../../docs/BRANDING.md) on `:root`, dark by default with `prefers-color-scheme: light` overrides. To theme the embedded client without colliding with its tokens, `src/app.ts` sets `--gateway-*` custom properties on `.gateway-shell` and inserts `collab-client.<hash>.css` ahead of `app.<hash>.css`.
 
-Text is Geist and identifiers are Geist Mono, self-hosted latin subsets with `font-display: swap`
-and system fallbacks. Regenerate them with `bun scripts/vendor-geist.ts` and the vendored Nerd Fonts
-v3.5.1 symbol subsets with `bun scripts/vendor-nerd-symbols.ts` (both need fontTools with Brotli
-and `pyftsubset` on `PATH`; `FONTTOOLS_PYTHON` can select the Python environment). Each script
-downloads and SHA-256-verifies its pinned archive, or accepts `--source <directory>` for an
-already-extracted copy, and writes a manifest of digests beside its output. The symbols use the
-Mono face's uniform one-em advance and never replace ordinary Unicode characters; deterministic
-chunks contain at most 160 populated BMP PUA glyphs or 768 plane-15 glyphs each. The build hashes
-every font file and appends its `@font-face` rule. Icons, the notification badge, and the artwork
-are rendered from their committed sources by `bun run media:brand`.
-See `licenses/fonts/` and `THIRD_PARTY_NOTICES.md` for licenses and icon-set attributions.
+Regenerate the vendored Geist subsets with `bun scripts/vendor-geist.ts` and the Nerd Fonts v3.5.1 PUA chunks with `bun scripts/vendor-nerd-symbols.ts` (each verifies a SHA-256 archive or accepts `--source <directory>`, requires `pyftsubset` on `PATH` and Python `fontTools` with Brotli — optionally selected via `FONTTOOLS_PYTHON=<python-bin>` — and caps chunks at 160 populated BMP PUA glyphs or 768 plane-15 glyphs).
+
+Render raster icons (`src/*.png`), `src/badge-96.png`, and social artwork (`assets/*.png`) with `bun run media:brand`; licenses and attributions are in `licenses/fonts/` and `THIRD_PARTY_NOTICES.md`.
 
 ## Motion
 
-Motion runs only on user-initiated transitions and genuine state changes (ADR-040). `render()`
-computes a structural signature before touching the DOM and starts a typed same-document view
-transition (`list`) only when it changed; a refresh that moves `lastSeenAt` alone commits without
-one. Full-screen View from the directory runs a `forward` transition in which the tapped tile morphs into
-the shell header tile, and the interactive return runs `back`; renders that arrive during a
-navigation wait for it. Every commit is the same with or without motion: an unsupported browser,
-a hidden page, an open dialog, or `prefers-reduced-motion` skips the transition and applies the
-DOM directly. `e2e/motion.e2e.ts` pins which changes animate; the visual lane keeps reduced motion.
+In `src/app.ts`, `render()` computes a structural signature before mutating the DOM and starts a same-document view transition (`list`, `forward`, `back`) only when session membership, group placement, or route changes; routine `lastSeenAt` refreshes commit directly.
 
-ADR-042 adds one deliberate arrival inside a genuine same-scope `list` transition:
-`data-arrived="true"` expands/fades the live ring over `--motion-long`, raises the title
-4px over `--motion-medium`, and settles the copy 60ms later. The prior signature includes the
-scope and both waiting/held groups; a fresh load, scope change, or unchanged return never plays it.
-A queue emptied while a session was open does play on return. Cached rows lose the arrival
-attribute before detaching, preventing replay. The shell's **Answered — all clear** check is an
-inline SVG stroke drawn once over medium. Reduced motion removes both effects.
+A same-scope transition from a non-empty waiting or held queue to all clear sets `data-arrived="true"` (`--motion-long` ring fade and `--motion-medium` title rise in `src/styles.css`) and strips it before row detachment so cached rows cannot replay. Unsupported browsers, hidden documents, open `<dialog>` elements, and `prefers-reduced-motion: reduce` skip view transitions ([PWA UI system](../../docs/BRANDING.md#pwa-ui-system-omp-sessions)).
 
 ## Trays
 
-`src/tray.ts` owns one native `#tray` dialog and a maximum-three-panel stack (ADR-041).
-Each modal panel has one topic or primary action, a title, and a 48px leading Close or Back control.
-Settings opens **Background alerts**; only enabled alerts reveal **Alert detail**, whose radios
-apply immediately and return to the root. The existing notification elements are moved, not copied.
-The tonal **Options** pill beside the primary action opens **This request** with immediate Hold for desk and View transcript choices.
+`src/tray.ts` drives `<dialog id="tray" closedby="closerequest">` (`src/index.html:64`) with an up-to-three-panel modal stack (`showModal()`). Intercepting `cancel` pops child panels or invokes `onBack`, `close` restores modality after non-cancelable consecutive Chromium close requests, exit waits for `transitionend` with a fallback, and root panels light-dismiss on outside clicks.
 
-Modal trays use `showModal()`, native focus containment and focus return, body scroll lock, and
-safe-area padding. Escape/platform close requests pop a child or dismiss the root without adding
-history entries. Only the grip drags; the body scrolls independently. Content swaps make the
-outgoing panel inert and move focus to the incoming heading while measured heights transition.
-Adjacent panels differ by at least 24px; reduced motion swaps instantly. Class-driven exits keep
-the dialog modal until `transitionend` or a bounded fallback closes it on engines without
-`overlay`/`display` transitions. Backdrop coordinates provide light dismiss without `closedby`.
+In `src/app.ts`, **Hide** opens `#tray` non-modally (`show()`, `role="status"`) for a 5-second **Undo** window paused on hover or focus. **Open request** mounts `packages/collab-client` at roughly 72% of the visual viewport, and **Expand** calls `tray.promote()` to reparent `.gateway-shell` and its client `#root` into `document.body` at `/client/` without remounting or dropping its socket or draft.
 
-Hide uses the same host non-modally as a compact tile/copy/filled-Undo row, without a heading,
-grip or countdown. Its polite status announcement has a five-second Undo window paused while
-hovered or focused. Generation/source-bound Undo and persistent Show all
-retain their device-local semantics and storage formats.
-
-Open request immediately presents a compact loading tray with the attention grip. The ordinary validated launch
-mounts the pinned client once inside a roughly 72%-visual-viewport panel. One header owns the
-session tile/title, connection dot and icon-only Expand control; the client's inner frame is flat,
-and its shell bar stays hidden until promotion. Expand (or tapping the
-tray title) grows to the visual viewport, then reparents the same shell and `#root` into the body;
-the relay socket and composer draft survive, and only promotion replaces the URL with `/client/`.
-Closing disposes synchronously and restores the cached directory. Pagehide drops the capability;
-bfcache resume revalidates and reacquires it with the original full/tray presentation. No document
-View Transition runs while the dialog is open. `e2e/trays.e2e.ts` covers these transitions and
-capability non-persistence; optional `OMP_TRAY_SCREENSHOTS` writes synthetic smoke screenshots.
-
-In Control, **Hold → next** follows the embedded client's pending request, not just the polled
-directory Ask. Sending keeps **Sending…** until host acknowledgement; once no section remains,
-Hold disappears even if discovery is delayed or its event stream is stale. Another unanswered
-section or a request replay after reconnect can restore Hold for the same directory Ask. View
-retains metadata-only Hold behavior. **Answered** / **Next ask →** still wait for the opened
-directory request to clear or change; a different request in the same session is new queued work.
-
-The first-run introduction uses the same host after an authoritative render on a visible `/`
-entry, never during loading, a session, a routed launch, or another open tray. Connected uses
-the masthead mark and the current host label/session count. Background alerts moves the single
-`#alerts-panel` (and its real seven-state `#notify` control); **Not now** advances without enabling.
-View or Control explains the two explicit actions. **Next**/**Done**, native Back/Esc, and the
-leading controls share the stack; resume preloads Back destinations without showing intermediate
-steps. The root control is named **Skip introduction**. Every step focuses its heading and has
-a different height on phone and desktop. `e2e/first-run.e2e.ts` covers persistence, notifications,
-arrival gates, privacy, and optional synthetic screenshots via `OMP_FIRST_RUN_SCREENSHOTS`.
+In **Control**, **Hold → next** tracks unanswered questions in a multi-question prompt rather than directory metadata alone; first-run trays reparent the hidden `#alerts-panel` template from `src/index.html` rather than cloning `#notify` ([PWA UI system](../../docs/BRANDING.md#pwa-ui-system-omp-sessions)).
 
 ## Multiple configured hosts
 
-`GET /api/v1/client-config` is loaded at bootstrap, bounded to 32 KiB with a four-second
-deadline. A 404 retains the local-only experience; malformed, unsupported or origin-mismatched
-configuration leaves the local directory usable and offers Try again in the single banner.
-Reconnect retries failed bootstrap after the local snapshot recovers. Changes to an already
-loaded configuration need a reload. The native Host picker scopes counts and actions, not transport work.
+`src/fleet.ts` loads `GET /api/v1/client-config` (4-second timeout, 32 KiB cap) and polls up to seven remote `fleet.targets` directly with CORS and omitted credentials, while `src/app.ts` binds launches, history, and bfcache resume to `SourceKey` (`id + "\0" + origin`) and a monotonic selection epoch ([Fleet sources](../../docs/ARCHITECTURE.md#fleet-sources), [Availability model](../../docs/ARCHITECTURE.md#availability-model)).
 
-`fleet.ts` owns DOM-free remote transport and persistence helpers. Each configured remote origin
-is fetched directly with CORS, omitted credentials, no-store and redirects refused. There is no
-gateway proxy, remote SSE, remote configuration discovery, remote health endpoint or fleet push.
-Visible pages poll every ten seconds with one coalesced request per host, a five-second deadline
-and an 8 MiB body cap. Transient failures retain disabled stale rows for 35 seconds, then remove
-them; a readable 403 clears rows immediately and stops automatic polling until a foreground/online
-recheck, with no Retry action. Offline retains the observation clock and stale-grace deadline;
-scheduled recovery resumes polling without depending on an online event. Hiding/freezing aborts
-work without recording a failure. Each source owns its epoch,
-request sequence and revision domain; a completed full snapshot can have a lower revision after
-a remote daemon restarts.
+For fleet notifications (background Web Push alerts from other hosts via the home gateway's Push v3 coordinator; [Fleet notifications](../../docs/ATTENTION_SPEC.md#fleet-notifications)), one installed home PWA covers both local and selected remote hosts without a second PWA install.
 
-Session identity includes both the configured source ID and canonical origin. Launches freeze
-that binding, generation, requested mode, optional ask identity and selection epoch. A newer intent,
-picker change, pagehide, or withdrawn source cancels the old attempt; a late response cannot mount
-another host's same-ID session. View-to-Control, Hold-to-next, history, and bfcache resume retain
-the binding. All-hosts attention uses this browser's first-observed waiting order, not clocks from
-different hosts. Single-host queues retain ask timestamp FIFO.
-
-Hold and Hide persist only bounded metadata records in `omp.sessions.held-asks.v2` and
-`omp.sessions.dismissed.v2`, adding `sourceId` and `sourceOrigin` to the previous record shapes.
-V1 records migrate to the local source; the old key is removed only after the v2 write succeeds.
-Removed or rebound source records are discarded. Transport failures never prune these decisions.
-Push and notification intents always address the home host, even when remote instance IDs collide.
-Remote Hold never enumerates home notifications. Alerts for other hosts require their own PWA install.
-
-The separate `localStorage` key `omp.sessions.first-run.v1` stores only
-`{ "version": 1, "step": "alerts" | "modes" | "done", "updatedAt": "<ISO timestamp>" }`,
-bounded to 128 characters. A missing record starts Connected; Back to Connected removes the
-record; advancing records the current step; Done or skip records `done`. Corrupt/unsupported
-records and inaccessible storage count as done. No identifiers, permission state, or capabilities
-are stored by the introduction.
-
-The embedded client receives a bounded source-bound sessions probe and the home configuration's
-`speech.browserRecognition` opt-in. Keyboard dictation remains the baseline. In-page recognition,
-when enabled and supported, is Control-only; accepting recognized text and sending it are separate
-actions owned by the pinned collaboration client.
-
-Focused checks: `bun --cwd=apps/web run typecheck` and `bun test apps/web/test`.
-`e2e/fleet.e2e.ts` runs two real loopback origins with reciprocal exact-origin CORS, verifies
-preflight and credential omission, and audits a metadata-only request log for forbidden remote
-SSE/configuration/push traffic. Browser coverage uses the repository's normal browser runner.
+`FleetNotificationTransport` posts 30-day owner grants to selected remote sources and activates them on the home gateway, while `src/app.ts` sends `omp-notification-mode` (`fleet: true`) and `omp-notification-reconcile` snapshots to `src/service-worker.ts` via `postMessage` and passes `probeGateway` and `speech.browserRecognition` to `startCollabWithCapability` (`packages/collab-client/upstream/src/embed.ts`).
 
 ## Creating a session in Tern
 
-**New session** appears beside the directory controls and in its empty state. A host must opt in
-with administrator-approved Tern choices; an older or unconfigured gateway shows an honest
-unavailable panel with **Retry options**, never a guessed executable or path. The wizard uses
-logical Back on the existing native tray, replacing one panel per step without browser history
-entries. One host and one working copy skip their respective choice panels; a scoped/remembered
-host and valid remembered choices are preselected against fresh options.
+`src/session-creation.ts` (`SessionCreationController`) drives **New session** on the shared tray via `replace()`, skipping single-choice **Host** or **Working copy** steps, preselecting valid `omp.sessions.creation-prefs.v1` choices, and tracking **Starting in Tern → Waiting for OMP → Opening Control**.
 
-The explicit **Create and open Control** action generates one operation UUID. Options/status
-requests time out after four seconds; POST after ten. Remote calls use CORS with omitted
-credentials and refused redirects; readable authorization loss revokes the source. Status polling
-starts one second after the preceding request completes, with a 120-second watching budget.
-Starting session shows **Starting in Tern → Waiting for OMP → Opening Control**: completed steps
-use the drawn check, the active live dot uses the existing status pulse, and future steps are
-muted. Reduced motion keeps the dot still. Opening Control remains visible and cancellable until
-the ordinary session shell mounts.
-Closing, changing scope, competing navigation/trays, authorization loss, backgrounding, freeze,
-and pagehide stop watching, not the command running in Tern. Foregrounding never automatically
-creates or opens. **Check creation** reads the known operation or explicitly replays the identical
-POST after a lost acknowledgement only while the intent is younger than one hour. At one hour or
-later, a known operation remains GET-only; without an operation ID, Check refreshes the directory
-and warns that the session may already exist, never POSTing again. After the watching deadline it
-performs only one bounded check. No uncertain outcome automatically retries creation.
+`SessionCreationTransport` uses 4-second `GET` and 10-second `POST` timeouts, polls status 1 second after each response across a 120-second budget, and limits **Check creation** `POST` replay to intents younger than 1 hour ([Session creation state machine](../../docs/PROTOCOL.md#session-creation-state-machine)).
 
-Only `{sourceId, sourceOrigin, projectId, workingCopyId, profileId, updatedAt}` choices persist in
-`omp.sessions.creation-prefs.v1`: version 1, at most eight records and 16 KiB. Removed/rebound
-sources are pruned only after an authoritative bootstrap. Storage failure leaves creation usable.
-Tracking intents and the optional **First task** remain in page memory, never requests, history,
-storage, logs, or process arguments. The task is bounded to 8,000 Unicode code points / 32 KiB;
-backgrounding preserves it in the suspended flow, while explicit Close, selection changes,
-authorization loss and pagehide discard it. Starting a fresh flow, including **Start another
-session** or reopening a backgrounded review without a creation intent, clears the old task.
-
-Ready refreshes that source, requires the exact instance/generation and Control, then opens the
-ordinary full-screen client. A source/instance/generation-bound holder supplies the draft once
-through `takeInitialPromptDraft`; only the client inserts it into an empty, live writable composer.
-It never sends, overwrites an existing draft, or fills an Ask. A failed pre-mount open may retry
-the same binding; cancellation, changed bindings, starting another flow and shell disposal discard
-the holder. Cancelling or discarding a pending creation handoff clears its Opening control banner
-without replacing a newer failure status.
-
-`e2e/session-creation.e2e.ts` covers the wizard, terminal states, lost acknowledgements, native
-Back, background/foreground, preferences, source-bound CORS and private sinks. Set
-`OMP_CREATION_SCREENSHOTS` for synthetic step/state captures at 412×915 and 1280×800.
-This browser evidence is not real-host Tern or physical-device qualification.
+The optional **First task** (at most 8,000 Unicode code points and 32 KiB) stays in page memory and passes once through `takeInitialPromptDraft` into an empty writable **Control** composer after ordinary OMP discovery and launch, never auto-sending.
 
 ## Synthetic visual review
 
-From the repository root, `bun run test:visual` builds the real dashboard/client and validates seven
-states at 390×844, 810×1080 and 1280×800 (21 unique state/project names), including partial host coverage. It never starts Percy
-or passes a token. Fixed clock/randomness, en-US/UTC, dark theme, reduced motion and DPR 1 keep
-captures deterministic. Directory asks are metadata-only; collaboration prose/code are authored
-synthetic content from `e2e/synthetic-product-fixture.ts`, whose defaults also serve README capture.
+From the repository root, `bun run test:visual` builds `apps/web/dist/` and runs `visual/dashboard.visual.ts` (`playwright.visual.config.ts`) across 21 deterministic synthetic snapshots (seven states at `390×844`, `810×1080`, and `1280×800`) from `e2e/synthetic-product-fixture.ts` without starting Percy or requiring a token (`visual/snapshot-safety.test.ts` checks the serializer guards).
 
-`bun run test:visual:percy` requires `PERCY_TOKEN`, a healthy local Percy server started by the
-pinned CLI, all 21 guarded submissions and a finalized build. Native Node.js (24.22.0 LTS in CI)
-must be on `PATH` for the Percy CLI only; builds and the visual worker stay on Bun 1.4.4. CI
-passes the executable from its SHA-pinned setup-node step; missing local Node fails closed with
-`reason=node-missing`. Percy must not run under Bun's HTTP compatibility layer.
-Serialized HTML/resources and the
-SDK's exact POST fail on any canary/identifier material; no silent fallback, traces, recordings,
-raw diagnostics or committed Percy output are allowed. Geometry includes the 560px directory,
-900px desktop View transcript and aligned session header, plus serialized parity at every viewport.
-Control Ask retains its bounded 880px embedded body and inner transcript, with the same parity
-and header-alignment checks rather than the normal View width.
-This advisory signal does not replace functional e2e or qualification. Project setup, eligible
-CI events and review policy are in [BrowserStack](../../docs/BROWSERSTACK.md).
-Failures report only closed-set phases/reasons and bounded counts, never raw Percy/browser text.
-Upload mode additionally runs a 21-case testing-host preflight and scans the redacted CLI logs
-Percy would receive; the vendor uploads CLI logs with builds even while CI-log upload is disabled.
-The retained fixture guard must also reject a planted SDK-log canary. This preflight never runs
-in local mode or uses a real token.
+`bun run test:visual:percy` uploads those 21 guarded snapshots when `PERCY_TOKEN` and native Node.js (24.22.0 LTS in CI) are on `PATH` for the Percy CLI while builds and workers run on Bun 1.4.4; serialization guards and preflight rules are in [BrowserStack and Percy visual review](../../docs/BROWSERSTACK.md).
+
+## Tests
+
+After `bun install --frozen-lockfile` and `bunx playwright install` (see [Contributing](../../CONTRIBUTING.md#build-from-source)), run `bun --cwd=apps/web run typecheck` and `bun test apps/web/test` from the repository root.
+
+Run the Chromium mobile lane (`playwright.config.ts`) with `bun run test:browser`, the cross-engine `@core` lane (`playwright.compat.config.ts`) with `bun run test:browser:compat`, or one suite with:
+
+```sh
+bun run build && bun scripts/test-browser.ts apps/web/e2e/trays.e2e.ts
+```
+
+| Suite (`e2e/`) | Coverage |
+|---|---|
+| `availability-lifecycle.e2e.ts` | Local and remote fault ownership, `403` withdrawal, retained empty clocks, cross-host triage notices, and bfcache revalidation. |
+| `client-refresh.e2e.ts` | Embedded collaboration client refresh behavior in **View** and **Control** across phone and desktop viewports. |
+| `desktop-layout.e2e.ts` | Narrow directory column and widened `60rem` collaboration shell alignment on desktop viewports (`@core`). |
+| `embedded-progress.e2e.ts` | Chunked join and reconnect progress, pre-live gateway or relay outages in request trays, and first-draft non-submission. |
+| `first-run.e2e.ts` | Three-step introduction, step resume, skip/Escape dismissal, corrupt-storage suppression, and queue-to-all-clear arrival gates (`OMP_FIRST_RUN_SCREENSHOTS=<dir>`). |
+| `fleet.e2e.ts` | Two-origin CORS polling and launches, credential omission, forbidden remote traffic audit, offline grace, and bootstrap recovery. |
+| `fleet-notifications.e2e.ts` | **Settings → Hosts** grant enrollment, renewal, revocation, Push v3 click revalidation, Push v2 compatibility, and IndexedDB worker persistence (`@core`). |
+| `launch.e2e.ts` | Same-document **View** and **Control** handoff, answer triage bar, `/client/` reload fallback, and capability-free bfcache restore (`@core`). |
+| `motion.e2e.ts` | Structural-signature view transitions vs quiet refreshes, cancelled forward transitions, and `prefers-reduced-motion` (`@core`). |
+| `network-recovery.e2e.ts` | SSE/snapshot reconnect, first-snapshot retry fault retention, stale rows, and 45-second **Troubleshooting** guidance (`@core`). |
+| `notifications.e2e.ts` | Activity-stop **View** routing, exact-request **Control** routing, stale route rejection, and in-place notification taps (`@core`). |
+| `session-creation.e2e.ts` | **New session** wizard, terminal errors, 1-hour lost-acknowledgement replay, memory-only **First task**, and remote CORS creation (`OMP_CREATION_SCREENSHOTS=<dir>`). |
+| `software-keyboard.e2e.ts` | Visual-viewport software-keyboard avoidance and zoom-free mobile composer sizing (`@core`). |
+| `theme.e2e.ts` | Live dark/light system scheme switching and 4.5:1 text contrast across Signal surfaces (`@core`). |
+| `trays.e2e.ts` | Modal stack, paused **Undo**, ~72% request tray and full-screen promotion, and multi-section **Hold → next** (`OMP_TRAY_SCREENSHOTS=<dir>`). |
+| `update.e2e.ts` | Immediate worker claim, 1-second idle directory reload, and deferred updates during active launches, routed alerts, or sessions (`@core`). |

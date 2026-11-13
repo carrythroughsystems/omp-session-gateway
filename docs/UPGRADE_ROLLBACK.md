@@ -1,133 +1,136 @@
 # Upgrade and rollback
 
-Use these procedures to update a running gateway, switch back to a retained predecessor runtime, or cross the `v0.3.0` → `v0.4.0+` architecture boundary. For exact qualified host and client combinations and release evidence, see [COMPATIBILITY.md](COMPATIBILITY.md) and [RELEASE_STATUS.md](RELEASE_STATUS.md).
+This guide is for administrators upgrading a running OMP Session Gateway, rolling back to a retained predecessor runtime, or crossing the `v0.3.0` boundary. For supported platforms and exact qualified Oh My Pi (OMP) and browser combinations, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
 
 ## Upgrade the gateway
 
-Mainline-to-mainline (`v0.4.0` and later) upgrades run in place over the active user service. Download and verify the new release archive ([Verify a published build](RELEASE.md#verify-a-published-build)), then run `install` with your production `--origin` and `--allow` values:
+Upgrades from `v0.4.0` and later run in place over the active user service. Confirm `bun --version` prints `1.4.4` and keep that Bun `1.4.4` binary at a persistent path on the host because `install` writes that exact Bun executable into the LaunchAgent, `systemd` user unit, or Windows scheduled task.
+
+Below, `omp-gateway <command>` is shorthand for `bun apps/gateway/src/cli.js <command>` run from the extracted release directory.
+
+1. Download and verify the latest release archive ([Verify a published build](RELEASE.md#verify-a-published-build)), and check `<configDir>/config.json` ([Paths](OPERATIONS.md#13-paths)) if you need to look up your existing `http.publicOrigin` or `auth.allowedLogins`.
+2. Extract the archive and run `install` with your `--origin` and `--allow` values (`--origin` and `--allow` replace `http.publicOrigin` and `auth.allowedLogins`, so pass `--allow` once per allowed login), then check `status` and `doctor`.
+
+On Linux and macOS:
 
 ```sh
 tar -xf omp-session-gateway-*-bun.tar
 cd omp-session-gateway-*-bun
 bun apps/gateway/src/cli.js install \
-  --origin https://host.tailnet.ts.net \
+  --origin https://host.example.ts.net \
   --allow you@example.com
 bun apps/gateway/src/cli.js status
 bun apps/gateway/src/cli.js doctor
 ```
 
-On Windows, run the same steps in PowerShell, one command per line:
+On Windows in PowerShell (one command per line):
 
 ```powershell
 tar -xf (Get-Item omp-session-gateway-*-bun.tar).Name
 cd omp-session-gateway-*-bun
-bun apps/gateway/src/cli.js install --origin https://host.tailnet.ts.net --allow you@example.com
+bun apps/gateway/src/cli.js install --origin https://host.example.ts.net --allow you@example.com
 bun apps/gateway/src/cli.js status
 bun apps/gateway/src/cli.js doctor
 ```
 
-The installer validates your existing `config.json`, preserves an omitted `--port`, `http.hostname`, `http.trustedDashboardOrigins`, `registry` settings, authored `omp` overrides, `fleet`, `speech`, `tern`, `notifications`, `readiness-token`, and Web Push state verbatim, and switches `installation/current.json` only after the new service passes its authenticated loopback readiness check. Reinstalling or upgrading never strips `http.trustedDashboardOrigins`, `fleet`, `speech`, `notifications`, or `tern`. If startup or readiness fails, the installer restores the prior configuration, service definition, and verified runtime automatically.
-
-The service definition uses the exact Bun executable running `install`. Installing under Bun
-**1.4.4** re-points the LaunchAgent, systemd unit or Windows task to that Bun; keep its persistent
-path available. The release smoke creates `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun`.
-This does not change the Bun version recorded in a published release's original qualification.
+Confirm `status` reports `"ready": true` and `"diverged": false`, and `doctor` exits `0`. For the full list of configuration keys and state files that `install` preserves, see [Updates and rollback](OPERATIONS.md#10-updates-and-rollback). The installer updates `installation/current.json` only after authenticated loopback readiness passes; if startup or readiness fails, it restores the prior `config.json`, service definition, and verified runtime automatically.
 
 ## Roll back to a retained predecessor
 
-To switch the active user service back to the previous activated runtime without re-extracting an archive, run `rollback` from any verified extraction root (or the currently installed CLI):
+Run `rollback` when you need to switch the active user service back to a retained runtime without re-extracting an archive. From an extracted release directory, run:
 
 ```sh
 bun apps/gateway/src/cli.js rollback
 ```
 
-To select a specific retained version directory under `<stateDir>/installation/versions/`, pass `--to`:
+Bare `rollback` selects the immediate predecessor recorded before the active runtime in `<stateDir>/installation/history.json` (`{ "activations": [...] }`). If you removed the extraction directory, read `"versionDirectory"` from `<stateDir>/installation/current.json` ([Paths](OPERATIONS.md#13-paths)) and run `bun "<stateDir>/installation/versions/<versionDirectory>/apps/gateway/src/cli.js" rollback`.
+
+To switch to a specific retained directory under `<stateDir>/installation/versions/`, pass `--to` with the directory name (`<version>-<digest12>`, with no leading `v`, matching an entry in `<stateDir>/installation/history.json`):
 
 ```sh
 bun apps/gateway/src/cli.js rollback --to <version>-<digest12>
 ```
 
-Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` itself never prunes, so you can switch back and forth between the active release and its predecessor; if you need a version that was already pruned, verify and `install` its release archive again.
+Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` never prunes, so you can switch back and forth between retained versions; if a version was pruned, verify and `install` its release archive again.
 
-Rollback keeps the Bun running the command and rewrites the service definition with that executable;
-it does not restore the predecessor's Bun. After this move, run rollback under the persistent Bun
-**1.4.4**, and the selected predecessor then runs on 1.4.4 rather than its originally qualified Bun.
+Confirm `bun --version` is `1.4.4` before running `rollback`: `rollback` rewrites the service definition with the Bun executable running the command and does not restore an older Bun binary.
 
 ### Tern creation on every managed rollback
 
-Install/upgrade preserves optional `tern.window` verbatim, including `""`. The retained
-`v0.9.1` parser rejects that new field, so restoring a window-bearing backup requires a
-window-capable runtime. Managed rollback's existing wholesale `tern` projection removes
-the selector too; the Tern-free document is tested against the exact retained `v0.9.1`
-parser. No running Tern window or OMP process is changed by this config projection.
+Older gateway runtimes reject unknown `config.json` keys and refuse to start if newer sections remain in the file. Managed `rollback` and `rollback --to` remove unsupported authored keys according to the target version while leaving state files in `<stateDir>` untouched:
 
-Every managed `rollback` or `rollback --to` **conservatively disables creation** when `tern` is authored in `config.json`, regardless of the target version ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), because older runtimes reject unknown root keys:
+| Target runtime version | Keys removed from `config.json` | Untouched state files in `<stateDir>` |
+|---|---|---|
+| Every target | `tern` (including optional `tern.window`) | `session-creations.json` |
+| Older than `0.10.0` | `tern`, `notifications` | `session-creations.json`, `notification-grants.json`, `fleet-notifications.json` |
+| Older than `0.8.0` | `tern`, `notifications`, `http.trustedDashboardOrigins`, `fleet`, `speech` | `session-creations.json`, `notification-grants.json`, `fleet-notifications.json` |
 
-1. `rollback` atomically writes the **full authored document** to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service (restore or move that backup file first).
-2. `rollback` removes `tern` from `<configDir>/config.json` (`projectPreTernConfig`, composed with `projectPreNotificationsConfig` below `0.10.0` and `projectPreFleetConfig` below `0.8.0`), using the same transactional failure recovery as `install`.
-3. `rollback` starts and readiness-checks the target runtime while preserving `<stateDir>/session-creations.json` (which older runtimes ignore) and leaving running Tern tabs and OMP processes untouched.
+Before removing any authored key, `rollback` writes the complete original `config.json` to `<configDir>/config.pre-rollback.json` with owner-only permissions (`0600` on Linux and macOS; protected user ACL on Windows). There is one `config.pre-rollback.json` backup file; if it exists, `rollback` refuses to overwrite it and aborts before changing `config.json` or the service (restore, move, or remove that backup file first).
 
-To re-enable creation after installing a creation-capable runtime, copy `<configDir>/config.pre-rollback.json` back to `<configDir>/config.json`, remove `<configDir>/config.pre-rollback.json`, and run `bun apps/gateway/src/cli.js install --origin <origin> --allow <login>` and `bun apps/gateway/src/cli.js doctor` from the verified extraction directory ([Operations](OPERATIONS.md#opt-in-tern-session-creation)). Do not copy a backup containing `tern` onto a runtime that does not support creation.
+If the target runtime fails readiness, `rollback` restores the original `config.json` and repairs the active service definition. Older runtimes ignore the preserved state files in `<stateDir>`, answer unimplemented APIs with `404`, and leave running Tern tabs and `omp` processes untouched.
 
-### Rolling back across the `v0.10.0` notification configuration boundary
+For the multi-host, creation, and fleet notification designs, see [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption), and [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator). Never copy `notification-grants.json`, `fleet-notifications.json`, or `session-creations.json` into support archives.
 
-Runtimes older than `0.10.0` reject the optional `notifications` root key. Managed rollback
-removes that authored section through `projectPreNotificationsConfig`, composed with the existing
-Tern/fleet projections. There is **one** private `config.pre-rollback.json` containing the full
-original document, not one backup per section; an existing backup is never overwritten. Failed
-activation restores the full authored bytes before repairing the current service definition.
-At or above `0.10.0`, rollback leaves `notifications` unchanged (the independent conservative
-Tern projection still applies).
+Before restoring `config.pre-rollback.json`, confirm the release you are installing supports every saved section (`0.8.0` or later for `http.trustedDashboardOrigins`, `fleet`, and `speech`; `0.9.0` or later for `tern`; `0.10.0` or later for `notifications` and `tern.window`):
 
-Both `<stateDir>/notification-grants.json` and `<stateDir>/fleet-notifications.json` remain private
-and untouched for a later re-upgrade; older runtimes ignore them and answer fleet APIs with 404.
-Restore a backup containing `notifications` only on a runtime at least `0.10.0` that understands
-every other saved section, then reinstall/restart. Never copy grant state into diagnostics or
-support archives.
+1. Enter the verified extraction directory for the target release.
+2. Copy `config.pre-rollback.json` back to `config.json` and remove `config.pre-rollback.json` (if the target release does not support `tern` or `tern.window`, remove that key from `config.json` before step 3; see [Opt-in Tern session creation](OPERATIONS.md#opt-in-tern-session-creation)).
 
-### Rolling back across the `v0.8.0` fleet and speech configuration boundary
+   On Linux and macOS:
 
-Gateway runtimes older than `0.8.0` (`FLEET_CONFIG_SINCE_VERSION = "0.8.0"`) reject unknown `config.json` keys and refuse to start if `http.trustedDashboardOrigins`, `fleet`, or `speech` is present. When `omp-gateway rollback` (or `rollback --to`) targets a retained runtime older than `0.8.0` while any of those three keys is authored in `config.json` ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
+   ```sh
+   cp "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.pre-rollback.json" \
+     "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.json"
+   rm "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.pre-rollback.json"
+   ```
 
-1. `rollback` atomically writes your full authored configuration to `<configDir>/config.pre-rollback.json` with owner-only (`0600`) permissions. If `<configDir>/config.pre-rollback.json` already exists, `rollback` refuses to overwrite it and aborts before modifying `config.json` or the service.
-2. `rollback` rewrites `<configDir>/config.json` without `http.trustedDashboardOrigins`, `fleet`, and `speech` (and without `tern` whenever authored, as above), then starts and readiness-checks the older runtime.
-3. `rollback` prints the path to `config.pre-rollback.json` and the restore steps.
+   On Windows in PowerShell:
 
-To restore your fleet and speech settings after upgrading back to `v0.8.0` or later, first
-confirm the selected runtime understands **every** saved key; if the backup contains `tern`,
-use a creation-capable runtime or omit that section until you deliberately re-enable it:
+   ```powershell
+   Copy-Item -LiteralPath "$env:LOCALAPPDATA\OMP Session Gateway\config.pre-rollback.json" -Destination "$env:LOCALAPPDATA\OMP Session Gateway\config.json" -Force
+   Remove-Item -LiteralPath "$env:LOCALAPPDATA\OMP Session Gateway\config.pre-rollback.json" -Force
+   ```
 
-```sh
-cp "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.pre-rollback.json" \
-  "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.json"
-rm "${XDG_CONFIG_HOME:-$HOME/.config}/omp-session-gateway/config.pre-rollback.json"
-bun apps/gateway/src/cli.js install \
-  --origin https://host.tailnet.ts.net \
-  --allow you@example.com
-```
+3. Re-run `install` and `doctor` to apply the restored configuration, restart the service, and confirm all checks pass, then reload **OMP Sessions** on your phone:
 
-(On Windows, replace the path with `%LOCALAPPDATA%\OMP Session Gateway\config.pre-rollback.json` and `%LOCALAPPDATA%\OMP Session Gateway\config.json`.)
+   On Linux and macOS:
+
+   ```sh
+   bun apps/gateway/src/cli.js install \
+     --origin https://host.example.ts.net \
+     --allow you@example.com
+   bun apps/gateway/src/cli.js doctor
+   ```
+
+   On Windows in PowerShell:
+
+   ```powershell
+   bun apps/gateway/src/cli.js install --origin https://host.example.ts.net --allow you@example.com
+   bun apps/gateway/src/cli.js doctor
+   ```
 
 ## Recover across the v0.3.0 boundary
 
-Releases `v0.3.0` and earlier used a separate `publisher-token` and cannot answer the mainline readiness proof, so an in-place upgrade over a running `v0.3.0` service is refused. Before installing `v0.4.0` or later over `v0.3.0`, stop and unregister the old service using its own CLI:
+Releases `v0.3.0` and earlier used a separate `publisher-token` and cannot answer the mainline readiness proof, so an in-place upgrade over a running `v0.3.0` service is refused.
 
-```sh
-bun omp-session-gateway-0.3.0-bun/apps/gateway/src/cli.js uninstall
-```
+1. Stop and unregister the `v0.3.0` service using its own CLI while keeping your configuration and staged runtimes in place:
 
-Keep your existing configuration and staged runtimes in place, then run the new release's [standard `install` command](OPERATIONS.md#2-cli-and-daemon-installation) with your `--origin` and `--allow` values. The installer mints `readiness-token`, retires `publisher-token`, and starts the new service; restart any running `omp` processes under stock mainline OMP `>= 18.1.20` with `collab.autoStart` enabled.
+   ```sh
+   bun omp-session-gateway-0.3.0-bun/apps/gateway/src/cli.js uninstall
+   ```
 
-Returning from `v0.4.0+` to `v0.3.0` also requires a stopped transition rather than `omp-gateway rollback`: run `uninstall` with the current CLI, restore a `v0.3.0`-compatible `config.json` if you added mainline-only `omp` fields, and run `install` from the verified `v0.3.0` archive (which mints a fresh `publisher-token`).
+2. Run `install` from the verified latest release archive ([CLI and daemon installation](OPERATIONS.md#2-cli-and-daemon-installation)) with your `--origin` and `--allow` values to create `readiness-token`, remove `publisher-token`, and start the new service.
+3. Restart running `omp` processes under stock mainline OMP `>= 18.1.20` with `collab.autoStart` enabled ([OMP configuration](OPERATIONS.md#5-omp-configuration)).
+
+Returning from `v0.4.0` or later to `v0.3.0` also requires a stopped transition rather than `rollback`: run `uninstall` with the active CLI, restore a `v0.3.0`-compatible `config.json` without newer fields, and follow [Published-release history](COMPATIBILITY.md#fork-era-published-release-history) and [Verify a published build](RELEASE.md#verify-a-published-build) before running the `v0.3.0` `install` command.
 
 ## What rollback never does
 
-- **Never downgrades, restarts, or reconfigures `omp`:** running OMP processes keep the code and `collab.autoStart` setting they started with.
-- **Never rotates `readiness-token` or silently discards authored configuration:** `readiness-token` is never rotated. Configuration is untouched unless authored `tern` must be projected away on any rollback, `notifications` for a target older than `0.10.0`, or fleet/speech keys for a target older than `0.8.0`; save the full authored document to private `config.pre-rollback.json` first and refuse to overwrite an existing backup.
-- **Never stops Tern or clears creation evidence:** preserve the private ledger; tabs and OMP
-  processes already started remain running, and uncertain outcomes are never automatically retried.
-- **Never edits Tailscale Serve mappings or tailnet policy:** your external HTTPS origin and allowlist remain in effect.
-- **Never restores `publisher-token` or `v0.3.0` compatibility:** pointer rollback only switches between retained mainline gateway runtimes (`v0.4.0+`).
+- Never downgrades, restarts, or reconfigures `omp`: running OMP processes keep the binary and `collab.autoStart` setting they started with.
+- Never rotates `readiness-token` or silently discards configuration: `readiness-token` is preserved, and `config.json` changes only at the version boundaries in the table above after saving `config.pre-rollback.json` without overwriting an existing backup.
+- Never stops Tern or clears creation state: `<stateDir>/session-creations.json`, open Tern tabs, and started `omp` processes remain untouched, and uncertain creations are never retried automatically.
+- Never edits Tailscale Serve mappings or tailnet policy: your external HTTPS origin and allowlist stay unchanged.
+- Never restores `publisher-token` or `v0.3.0` compatibility: pointer `rollback` switches only between retained `v0.4.0+` gateway runtimes.
 
 <!-- release-generate:predecessor:start -->
 ## v0.11.0 predecessor compatibility

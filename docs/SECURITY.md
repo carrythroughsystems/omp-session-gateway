@@ -1,419 +1,185 @@
 # Security design and threat model
 
-This document is for operators, contributors, and auditors reviewing the threat model, trust
-boundaries, and security invariants of OMP Session Gateway. For installation, Tailscale Serve
-setup, and lost-phone recovery, see [Operations](OPERATIONS.md). To report a vulnerability
-privately, follow the [security policy](../SECURITY.md).
+This document is for security reviewers, operators, and contributors checking the threat model, trust boundaries, and security invariants of OMP Session Gateway, the companion to Oh My Pi (OMP). Read sections 1 to 13 for the shipped gateway's security model; section 14 covers test and release qualification tooling. For setup and recovery procedures, see [Installation and operations](OPERATIONS.md); to report a vulnerability privately, follow the [security policy](../SECURITY.md).
 
 ## 1. Security objective
 
-OMP Session Gateway safely brokers existing OMP collaboration bearer capabilities from local OMP processes to one authorized mobile user without persisting or broadly exposing those capabilities.
+OMP Session Gateway safely brokers existing OMP collaboration links from local OMP processes to one authorized mobile user without persisting or broadly exposing those links. A **View** or **Control** link is a bearer secret, called a capability in this document and [Protocol](PROTOCOL.md): a **Control** capability can read and steer a session, and a **View** capability can read sensitive transcript and tool activity.
 
-The project reduces manual secret handling; it does not make an OMP collaboration capability less powerful. A full-control link can read and steer a session, and a view-only link can read sensitive transcript/tool activity.
+The project reduces manual secret handling; it does not narrow the privilege of a collaboration capability.
 
-Stock OMP `>= 18.1.20` supplies the native collaboration controller and local registry. No fork,
-custom OMP build, or gateway-specific OMP plugin is required. The separately installed gateway
-reads metadata and brokers one capability per authorized launch; native integration does not
-remove the TUN-mode Tailscale Serve, allowlist, or user-controlled-workstation requirements below.
+Stock mainline OMP `>= 18.1.20` supplies the native collaboration controller and local registry, introduced in [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, and carried by [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20). No fork, custom OMP build, or gateway-specific OMP plugin is required.
+
+The separately installed gateway reads metadata and brokers one capability per authorized launch. Native OMP integration does not remove the TUN-mode Tailscale Serve, allowlist, or user-controlled-workstation requirements below.
 
 ## 2. Assets
 
-Highest-value assets:
+The threat model protects these highest-value assets:
 
-- full-control collaboration capabilities;
-- view-only collaboration capabilities;
-- transcript/tool/subagent data reachable through those capabilities;
+- full-control (**Control**) collaboration capabilities;
+- view-only (**View**) collaboration capabilities;
+- transcript, tool, and subagent data reachable through those capabilities;
 - session metadata such as project names, models, activity timing, and whether human input is required;
-- per-host OMP query tokens and the gateway-only readiness token;
+- per-host OMP discovery tokens (authorizing queries to each OMP host, meaning one running `omp` process) and the gateway-only readiness token;
 - tailnet and WebAuthn identity material;
-- private VAPID key material, browser push subscription endpoints/keys, and fleet grant secrets
-  and verifiers;
+- private VAPID key material, browser push subscription endpoints and keys, and fleet notification grant secrets and verifiers;
 - release-signing and update infrastructure.
 
 ## 3. Threat model
 
 ### In scope
 
+The gateway defends against these threats:
+
 - public-Internet scanning and accidental public exposure;
-- other devices/users on the LAN;
+- other devices and users on the LAN;
 - unauthorized users or devices in the tailnet;
 - cross-site requests and malicious web origins;
 - accidental secret persistence in logs, traces, metrics, caches, history, browser storage, screenshots, crash reports, source-map services, or diagnostics;
 - stale capability use after an OMP process exits, crashes, stops collaboration, or changes session;
 - a lost or temporarily unlocked phone that remains authorized in the tailnet;
-- malicious or malformed IPC/API input and resource exhaustion;
+- malicious or malformed IPC and API input and resource exhaustion;
 - dependency, build, installer, and update compromise;
 - a relay operator observing permitted metadata and ciphertext.
 
 ### Out of scope or inherited compromise
 
+The gateway does not defend against:
+
 - code already executing as the same desktop OS user;
 - a compromised OMP process, desktop kernel, browser engine, Android OS, identity provider, or Tailscale control plane;
 - a user intentionally sharing a collaboration link;
-- OMP model/provider behavior and tool authorization on the host;
+- OMP model or provider behavior and tool authorization on the host;
 - forensic recovery from process memory or swap after full local compromise.
 
 Document these limits plainly. Do not market the project as protection against same-user malware.
 
 ## 4. Network exposure
 
-Required default:
+Production deployments enforce these network invariants:
 
-- `omp-gatewayd` binds only to loopback;
-- Tailscale Serve provides tailnet HTTPS and strips spoofed incoming identity headers before adding trusted ones;
-- tailnet grants restrict HTTPS access to the intended user/device posture;
-- the application independently allowlists exact login names;
-- missing identity fails closed;
-- Tailscale Funnel and public reverse tunnels are not configured;
-- plain LAN HTTP is unsupported.
+- Production HTTP listeners (`omp-gatewayd`) bind only to `127.0.0.1` and optionally `::1`; plain LAN HTTP is unsupported.
+- Tailscale Serve over tailnet HTTPS is the supported remote path; do not configure or document Tailscale Funnel or public reverse tunnels as a normal path.
+- Never point any other forwarder (tunnel, reverse proxy, port forward, container publish, or `ssh -L`) at the gateway's loopback port, and run Tailscale in kernel TUN mode rather than `--tun=userspace-networking`.
+- Trust Tailscale identity headers only on the loopback backend behind Serve, where Serve strips spoofed incoming `Tailscale-*` headers before adding trusted ones; production rejects missing identity and compares normalized `Tailscale-User-Login` against an exact allowlist (`auth.allowedLogins`).
+- Development auth (`dev-localhost`) may allow loopback clients without Tailscale, and must reject non-loopback sources.
+- Keep source phones and browsers user-owned: [Tailscale Serve](https://tailscale.com/kb/1312/serve#identity-headers) populates user identity headers only for user-owned source devices, so a tagged source phone (`tag:...`) is denied even when network policy permits its connection ([Deployment dependency matrix](COMPATIBILITY.md#deployment-dependency-matrix)).
+- A tagged destination gateway is distinct from a tagged source phone; do not weaken authentication or treat Tailscale policy app capabilities as an implemented alternative.
+- Deploy only on a user-controlled workstation without mutually untrusted local accounts: direct loopback requests cannot be distinguished cryptographically from Serve-originated requests, so untrusted local processes or OS accounts are outside the HTTP trust boundary.
+- OMP's private discovery files restrict per-host queries to their OS-user boundary, and the gateway-only readiness token proves managed loopback readiness to `omp-gateway` (shorthand for `bun apps/gateway/src/cli.js <command>` from the extracted release); neither credential authenticates browser API requests.
+- In `tailscale-serve` mode, `authorizeHttpRequest` and `authorizeFleetFeedContext` (`apps/gateway/src/auth.ts`, covering browser HTTP and the machine notification feed in section 6) refuse requests before reading identity headers unless a local Tailscale tunnel interface is present (`fd7a:115c:a1e0::/48`, or a `100.64.0.0/10` `/32` host route on `tailscale0`, `utun<n>`, or `Tailscale`).
+- Second-hop HTTP proxy refusal likewise rejects requests before reading identity headers when `X-Forwarded-For` names multiple hops or a non-Tailscale address, when `Host` or `X-Forwarded-Host` disagrees case-insensitively with `http.publicOrigin`, or when `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `CF-Ray`, `X-Forwarded-Server`, or `Tailscale-Funnel-Request` is present.
+- Mode dispatch in `authorizeHttpRequest` is exhaustive so an unrecognized `auth.mode` denies closed, and admitted `/api/v1/events` SSE streams re-verify the tunnel interface on every keepalive so a stream cannot outlive its Serve topology.
+- Never set `auth.trustIdentityWithoutTailnetDevice` on a host with Tailscale installed: that test-harness flag declares that no tailnet reaches the host, restores the userspace-mode bypass if set on a Tailscale host, blocks rollback to older parsers that reject unknown `auth` keys, and never makes `omp-gateway doctor` ([`doctor` and diagnostics bundle](OPERATIONS.md#12-doctor-and-diagnostics-bundle)) report `loopbackTrustSound: true`.
+- Background notifications use outbound HTTPS from the gateway to browser-provided push endpoints with no inbound public gateway route and no Web Push `Topic` header, giving the push service no per-session identifier.
+- Web Push encrypts payloads for the browser subscription, while the push service observes the endpoint, source IP, payload size, and delivery timing (including activity-stop timing); treat subscription endpoints and keys as sensitive private state even though they cannot grant collaboration access.
 
-Keep the backend on localhost because another remotely reachable path would let callers inject
-`Tailscale-User-*` headers themselves. Direct loopback requests cannot be distinguished
-cryptographically from Serve-originated requests, so every untrusted process or OS account able
-to run on the desktop host is outside the v1 HTTP trust boundary. V1 is for a user-controlled
-workstation without mutually untrusted local accounts; do not deploy it on a shared shell host.
-OMP’s private discovery files and endpoints restrict per-host queries to their OS-user boundary.
-The gateway-only readiness token proves managed-install readiness; neither credential authenticates
-browser API requests.
+Why forwarders and userspace networking fail closed: any forwarder terminating remote traffic and dialing `127.0.0.1:<port>` — including `tailscaled --tun=userspace-networking`, common in containers, VPS images, and headless servers — presents a loopback peer to `apps/gateway/src/auth.ts` and forwards whatever `Tailscale-User-Login` the remote caller chose.
 
-Concretely, and stated as an operator rule because the reasoning above is easy to read as advisory:
-**never point any other forwarder at the gateway's loopback port.** A tunnel, reverse proxy, port
-forward, container publish, or SSH `-L` that terminates remote traffic and relays it to
-`127.0.0.1:<port>` presents a loopback peer, which satisfies the first authorization check in
-`apps/gateway/src/auth.ts`, and then forwards whatever `Tailscale-User-Login` the remote caller
-chose. That is not a weakened boundary but a complete authentication bypass: any client reaching the
-forwarder can name an allowlisted login and receive the session directory and live view and control
-capabilities. Tailscale Serve is safe here only because it overwrites caller-supplied identity
-headers; nothing else in this design does. A future non-Serve path therefore requires its own
-authenticator plus unconditional stripping of `Tailscale-User-*`, not merely a transport swap. See
-[#74](https://github.com/alphastorm/omp-session-gateway/issues/74) and
-[#158](https://github.com/alphastorm/omp-session-gateway/issues/158) for worked examples of
-proposals that fail on exactly this point.
+That creates a complete remote authentication bypass ([#74](https://github.com/carrythroughsystems/omp-session-gateway/issues/74), [#98](https://github.com/carrythroughsystems/omp-session-gateway/issues/98), [#158](https://github.com/carrythroughsystems/omp-session-gateway/issues/158)); any future non-Serve path requires its own gateway-verified authenticator plus unconditional stripping of `Tailscale-User-*`.
 
-**The listener now refuses requests that carry evidence of a second HTTP hop,** so the most likely
-version of that mistake fails closed instead of silently granting control. An HTTP proxy leaves
-marks that Serve never produces, and a remote caller cannot instruct the proxy in front of it to
-stop inserting them. Measured against Serve's own proxy (`ipn/ipnlocal/serve.go`,
-`addProxyForwardedHeaders` and `addTailscaleIdentityHeaders`), a Serve-originated request carries
-`X-Forwarded-For` set to exactly one address — the tailnet source — and preserves the inbound `Host`,
-setting `X-Forwarded-Host` to that same host. Serve deletes every inbound `Tailscale-*` header before
-setting its own. `authorizeHttpRequest` therefore refuses, before reading the identity header, when
-`X-Forwarded-For` names more than one hop or a non-Tailscale address, when `X-Forwarded-Host`
-or the request's own `Host` disagrees with the configured public origin's host (case-insensitively),
-when `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `CF-Ray`, or `X-Forwarded-Server` is present, or
-when the request is marked as Funnel. A browser cannot set `Host`, so a page under an attacker's
-hostname whose DNS is rebound to the loopback listener cannot reach the identity path. The same
-host checks apply to machine requests for the notification feed.
+Second-hop refusal is defense in depth rather than authentication: it catches HTTP reverse proxies (Cloudflare Tunnel, ngrok) and browser DNS rebinding (browsers cannot forge `Host`), whereas raw TCP forwarders (`socat`, `ssh -L`) insert no HTTP headers and remain indistinguishable from Serve.
 
-**This is defence in depth and explicitly not authentication.** It catches Cloudflare Tunnel,
-ngrok, and ordinary reverse proxies, which all insert at least one of those headers. It does not
-catch a raw TCP forwarder — `socat`, `ssh -L`, a bare tunnel — which inserts nothing and can carry
-the expected `Host`, remaining indistinguishable from Serve; it does not make the operator rule above
-optional. Only an authenticator the gateway can verify itself closes that gap. The mode dispatch in
-`authorizeHttpRequest` is exhaustive for the same reason: a future auth mode denies until it is
-given an explicit arm, rather than inheriting Tailscale header trust by omission.
+Because Tailscale offers no per-request cryptographic proof from Serve to the backend and shared `100.64.0.0/10` CGNAT leases appear routinely in containers and carrier networks, an absent tunnel interface returns `403`, logs `http.identity_trust_unsound` once, and sets `loopbackTrustSound: false` in `doctor` (an IPv6-disabled host whose device is renamed via `--tun` fails closed visibly). Qualification also probes the gateway port from a distinct tailnet node for end-to-end proof.
 
-**Tailscale's own userspace-networking mode is such a forwarder, and this is the trap most likely to
-catch a real operator.** `tailscaled --tun=userspace-networking` has no TUN device, so its netstack
-accepts inbound tailnet connections and dials `localhost` to service them. The gateway then sees a
-genuine loopback peer for traffic that originated on another machine, and trusts the caller's
-`Tailscale-User-Login` verbatim. Serve is not in that path and cannot overwrite anything.
-
-On a host running userspace-mode `tailscaled` with its listener bound to `127.0.0.1:4317` only, a
-probe from a different tailnet node to `http://<node-tailnet-ip>:4317/api/v1/sessions` reaches the
-loopback listener directly and can supply a forged `Tailscale-User-Login` header unless the gateway
-verifies the host's tailnet interface. On a host running the normal TUN-mode client, direct probes
-to the gateway port on tailnet and LAN addresses are refused outright.
-
-Userspace mode is not exotic: it is the usual way to run Tailscale in a container, on many VPS
-images, and on headless servers, which are exactly the hosts an operator is most likely to automate.
-Run the TUN-mode client on any host serving this gateway. Tracked as
-[#98](https://github.com/alphastorm/omp-session-gateway/issues/98).
-
-**The gateway now refuses rather than warns.** Because Tailscale gives the backend no secret,
-signature, or channel binding that Serve alone could present, there is nothing to verify per
-request; the only thing checkable is whether the topology still makes Serve the sole path in. In
-`tailscale-serve` mode the daemon therefore reads the host's interface table and, unless an interface
-looks like Tailscale's *tunnel device*, returns `403` to every request instead of believing
-`Tailscale-User-Login`. It logs `http.identity_trust_unsound` once when it observes that state, and
-`doctor` reports `loopbackTrustSound: false`. Refusing costs nothing when the signal is absent:
-without a tailnet interface, Serve cannot be routing tailnet requests to that process anyway.
-
-**`100.64.0.0/10` does not vouch for itself.** That range is not Tailscale's: RFC 6598 assigns it as
-shared address space, and carriers, mobile hotspots and container networks allocate out of it
-routinely, so a host holding a CGNAT lease would otherwise pass this check while running userspace
-mode — a container with a CGNAT pod CIDR being the obvious case, and containers being exactly where
-userspace networking is used. Accepted instead are an address in `fd7a:115c:a1e0::/48`, which is
-Tailscale's own allocation and decisive on its own, or a `100.64.0.0/10` **host route** on a
-tunnel-named interface (`tailscale0`, `utun<n>`, `Tailscale`). An IPv6-disabled host whose device is
-renamed through `--tun` fails closed and visibly, which is the safe direction for that error.
-
-An admitted `/api/v1/events` stream is re-authorized on each keepalive, so a feed cannot outlive the
-topology that justified it.
-
-The signal has to be read in that direction. Probing our own tailnet address cannot tell the two
-topologies apart, because in userspace mode the host has no route to that address either, so the
-probe fails identically on a safe host and an exposed one. Detecting *whether tailscaled is running*
-is no better: its socket path is platform-specific and can be overridden on the command line, so a
-detection miss would silently re-open the bypass. Absence of a tailnet interface is therefore treated
-as unsafe rather than inconclusive.
-
-One escape exists for automated harnesses, `auth.trustIdentityWithoutTailnetDevice`. It declares that
-no tailnet can reach the host at all, which is true of a CI runner with no Tailscale installed and is
-how the capacity job exercises the production identity path. It asserts a fact rather than
-establishing one: setting it on a host running userspace-mode `tailscaled` restores the full bypass.
-`doctor` reports `loopbackTrustSound` from the interface table and not from the configuration, so a
-host that sets the flag while running userspace mode still fails that check. Never set it on a host
-that has Tailscale installed.
-
-A host that sets the flag also **cannot roll back** to an earlier gateway without editing its
-configuration, because the older parser rejects unknown `auth` keys and refuses to start.
-
-**If a pre-fix build ever ran on a userspace-mode host, treat what it accepted as compromised.**
-Refusing new requests does not retract what the exposed window granted. Push subscriptions are the
-persistent case: delivery re-checks the stored identity against the current allowlist on every send,
-so removing a login stops delivery, but a subscription registered under a *forged allowlisted* login
-is indistinguishable from a legitimate one. Delete `push-state.json` from the state directory and
-re-enable notifications from the phone. Collaboration capabilities need no such step because they are
-never persisted and die with their generation.
-
-A second tailnet node remains the only *end-to-end* proof, because the refusal above is a local
-inference about the topology rather than an observation of what a remote peer can reach; the
-qualification lanes probe the gateway port from a distinct node for that reason.
-
-According to [Tailscale Serve’s identity contract](https://tailscale.com/kb/1312/serve#identity-headers),
-user identity headers are populated for user-owned source devices, not tagged source devices.
-The gateway trusts `Tailscale-User-Login` only on its loopback backend behind Serve and compares
-the normalized login against an exact application allowlist. Keep the Android phone user-owned;
-a tagged destination gateway is distinct from a tagged source phone. The latter is denied even
-when network policy permits its connection. Do not weaken authentication or treat Tailscale app
-capabilities as an implemented alternative. See the
-[deployment dependency matrix](COMPATIBILITY.md#deployment-dependency-matrix).
+If an exposed forwarder or userspace-mode `tailscaled` with `auth.trustIdentityWithoutTailnetDevice` ever accepted traffic, push subscriptions registered under a forged allowlisted login remain indistinguishable from legitimate ones even though capabilities were never persisted. Delete `push-state.json` from the state directory and re-enable alerts from the phone ([Paths](OPERATIONS.md#13-paths)).
 
 ### Tailnet controls are separate from application authorization
 
-The [operator procedure](OPERATIONS.md#6-tailnet-access-policy) covers the gateway node and phone
-separately. All controls below retain the exact login allowlist, loopback/TUN-mode boundary, and
-Serve-only tailnet HTTPS path; none permits Funnel or another forwarder. In particular, the
-gateway does **not** read or enforce device posture.
+Tailnet policy controls and application authorization are independent required layers ([Tailnet access policy](OPERATIONS.md#4-tailnet-access-policy)). Every control below retains `auth.allowedLogins`, the loopback and kernel-TUN boundary, and the Serve-only HTTPS path; none permits Funnel or another forwarder, and the gateway does not read or enforce device posture.
 
 | Control | Protection and failure mode | What it does not replace |
 |---|---|---|
-| [Grants / legacy ACLs](https://tailscale.com/docs/reference/grants-vs-acls) | Scope the phone’s user to the gateway tag and HTTPS port; restrict gateway-originated access separately. [Grants are additive](https://tailscale.com/docs/reference/syntax/grants), so broader overlapping access defeats a narrow rule. | Network permission is not gateway authorization. A user selector is not a unique-phone selector, and a tag owner is not automatically an authorized application user. |
-| [Device approval](https://tailscale.com/kb/1099/device-approval) | Review device admission; pending devices cannot send or receive tailnet traffic. Pre-approved keys can skip manual review, and approval applies to the device rather than each user/node on shared hardware. | Not ongoing compliance, current user verification, or the application allowlist. |
-| [Node key expiry](https://tailscale.com/kb/1028/key-expiry) | Forces periodic reauthentication when enabled; expiration breaks endpoint connectivity, even if the gateway daemon remains healthy. Tagged devices start with expiry disabled on first tagged authentication; operators must check the actual setting. | Not immediate lost-phone revocation or the application allowlist. Disabling expiry trades away that periodic boundary for availability. |
-| [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) | Peers require trusted signatures on node keys; an unsigned phone/gateway stays locked out. Compromised signers and lost recovery secrets are separate custody risks. | Not device health, the application allowlist, or protection from a compromised signed phone. **Device approval and Tailnet Lock are currently mutually exclusive**, not cumulative controls. |
-| [Device posture](https://tailscale.com/kb/1288/device-posture) | `postures` plus a grant’s `srcPosture` constrain source devices using reported attributes. Nonmatching or required-but-unset attributes prevent that posture matching; another unrestricted rule can still allow access. | Not destination/gateway attestation, hardware identity, whole-device security, or the application allowlist. Tailscale’s documented shared-node/subnet-source exceptions mean posture must not be assumed across those paths. |
+| [Grants / legacy ACLs](https://tailscale.com/docs/reference/grants-vs-acls) | Scopes the phone's user to the gateway tag and HTTPS port; [additive grants](https://tailscale.com/docs/reference/syntax/grants) mean broader rules defeat narrow ones. | Application authorization, unique-phone identity, or `auth.allowedLogins` (tag owners are not automatically allowed). |
+| [Device approval](https://tailscale.com/kb/1099/device-approval) | Blocks unapproved tailnet devices; pre-approved keys skip review, and approval covers the machine rather than per-user accounts. | Ongoing device compliance, active user verification, or `auth.allowedLogins`. |
+| [Node key expiry](https://tailscale.com/kb/1028/key-expiry) | Forces periodic reauthentication; tagged nodes default to disabled expiry on first tagged login, and disabling expiry trades away that boundary. | Immediate lost-phone revocation or `auth.allowedLogins`. |
+| [Tailnet Lock](https://tailscale.com/kb/1226/tailnet-lock) | Requires trusted node-key signatures ([Android cannot sign](https://tailscale.com/kb/1226/tailnet-lock#limitations)); signer compromise and lost recovery secrets are custody risks. | Device health, `auth.allowedLogins`, or protection from a compromised signed phone; mutually exclusive with Device approval. |
+| [Device posture](https://tailscale.com/kb/1288/device-posture) | Constrains source devices via `postures` and `srcPosture`; unset attributes fail matching, while broader rules can bypass it. | Gateway attestation, hardware identity, whole-device security, shared-node/subnet paths, or `auth.allowedLogins`. |
 
-Keep signing authority and disablement secrets under separate, documented custody; an Android
-phone can be signed by a trusted desktop but cannot itself serve as a signing node under the
-current [Tailnet Lock limitations](https://tailscale.com/kb/1226/tailnet-lock#limitations). Validate
-merged policy in the admin console’s
-[policy preview](https://tailscale.com/docs/features/tailnet-policy-file/manage-tailnet-policies#preview-changes),
-then exercise allowed and denied devices. Preview and `doctor` are not independent proof of every
-tailnet control. Revoking tailnet access does not retract an already-issued bearer capability or
-terminate an established OMP relay session; follow the
-[lost-phone procedure](OPERATIONS.md#10-lost-phone-and-revocation) to rotate host capabilities.
-
-Background notifications add outbound HTTPS from the gateway to browser-provided push endpoints.
-No inbound public gateway route is required. Web Push encrypts the payload for the browser
-subscription, while the push service still observes the endpoint, source IP, size, and delivery
-timing (including activity-stop timing). Messages carry no Web Push `Topic`, so the push service
-receives no per-session identifier. Private notification detail does not hide this traffic
-metadata. Treat subscription endpoints and keys as sensitive private state even though they cannot
-grant collaboration access.
+Policy preview and `omp-gateway doctor` do not prove that unauthorized or tagged devices are denied; validate allowed, denied, and tagged sources live ([Validate the combined controls](OPERATIONS.md#validate-the-combined-controls)). Revoking tailnet access blocks new gateway requests without retracting an already-issued capability or terminating an established OMP relay room; follow [Lost phone and revocation](OPERATIONS.md#11-lost-phone-and-revocation) to stop active host rooms.
 
 ## 5. Relay exposure
 
-OMP encrypts collaboration frames client-side. The relay can observe room identifiers, connection/routing metadata, participant counts, timing, and ciphertext sizes, but should not receive plaintext payloads or room keys.
+Relay transport and client media handling enforce these boundaries:
 
-The existing relay is acceptable for v1 when this metadata/availability dependency is understood. Self-hosting can reduce third-party exposure but introduces TLS, WebSocket, update, and availability responsibilities. Treat it as an explicit advanced mode and run long-lived connection tests through the exact deployment path.
+- OMP encrypts collaboration frames client-side: the relay can observe room identifiers, connection and routing metadata, participant counts, timing, and ciphertext sizes, and does not receive plaintext payloads or room keys.
+- Keep the default OMP relay (`wss://my.omp.sh`) for the supported path; a self-hosted or proxied relay remains unsupported until separately threat-modeled and soak-qualified ([Unsupported deployments](OPERATIONS.md#15-unsupported-deployments)).
+- The embedded collaboration client ([Embedded collaboration client](../packages/collab-client/README.md)) renders and opens tool-result images only for JPEG, PNG, WebP, and GIF MIME types, rejecting HTML and SVG before thumbnails or blob windows are created.
+- Writable **Control** photo prompts re-encode accepted JPEG, PNG, or WebP inputs in volatile browser memory as metadata-free JPEGs, stripping source filenames, EXIF, and location metadata before transport ([Embedded integration](../packages/collab-client/README.md#embedded-integration), [Protocol](PROTOCOL.md)).
+- Normalized photo bytes enter only OMP's encrypted `prompt.images` frame and never traverse gateway HTTP or IPC, the service worker, URLs, history, logs, diagnostics, analytics, or browser storage; after send, ordinary host transcript and model-provider retention applies, and the original phone file is never uploaded.
+- Native file-input camera capture (`capture="environment"`) launches the OS camera UI without script camera access, so the gateway keeps `Permissions-Policy: camera=()` and never invokes `getUserMedia`.
+- `speech.browserRecognition` defaults to `false` ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)): OS keyboard dictation runs outside page JavaScript under `Permissions-Policy: microphone=()`.
+- When `speech.browserRecognition` is `true` on the home gateway (the gateway serving the installed app, whose setting is authoritative in federated sessions), only document HTML responses set `Permissions-Policy: microphone=(self)` while non-document responses keep `microphone=()`.
+- When enabled, the in-page Web Speech control mounts only in writable **Control** after disclosing that browser or OS speech providers receive audio outside the encrypted OMP relay before any prompt is sent; no speech server, API key, or audio persistence exists in the gateway, and **Use text** only populates the composer draft — it never submits (**Send** remains a separate action; recognizer bounds in [Embedded integration](../packages/collab-client/README.md#embedded-integration)).
 
-The embedded client renders and opens tool-result images only for JPEG, PNG, WebP, and GIF MIME
-types, rejecting HTML and SVG before thumbnails or blob windows are created.
-
-Phone photos are prompt content, not gateway metadata. A writable client accepts only JPEG, PNG,
-or WebP source files up to 24 MiB, rejects source dimensions above an 8,192px edge or 20 megapixels,
-canvas-re-encodes at most four as JPEG with a 2,048px edge and 1 MiB per-image cap, and thereby
-removes filenames, EXIF, and location metadata before transport.
-Only the normalized bytes enter the existing encrypted `prompt.images` frame. They never traverse
-gateway HTTP/IPC, the service worker, URLs, history, logs, diagnostics, analytics, or browser
-storage. Preview data URLs and base64 references are dropped on remove, host-confirmed send, and
-client disposal; an unconfirmed send retains the draft for retry. JavaScript memory is not claimed
-to be zeroized. After send, the normalized image
-is ordinary OMP prompt content and may persist in the host transcript and at the selected model
-provider under those systems' normal retention policies. The original phone file is not uploaded.
-
-The Photo action uses two hidden file inputs behind explicit user choices. **Take photo** adds the
-browser `capture="environment"` hint; **Choose existing** omits `capture`. Native file-input
-capture launches the operating-system camera UI and does not grant script-level camera access, so
-the gateway keeps `Permissions-Policy: camera=()` and never invokes `getUserMedia`.
-
-
-Speech input follows two distinct paths ([ADR-037](DECISIONS.md#adr-037--speech-input-keyboard-dictation-baseline-and-opt-in-browser-speech-recognition)):
-
-- **OS keyboard dictation (default baseline):** handled by the operating-system keyboard outside page JavaScript and inserts text into the standard composer `<textarea>` (with composer help copy `"Use your keyboard's microphone key to dictate into this box. iPhone: Settings → General → Keyboard → Enable Dictation. Dictation never sends — tap Send when the text is right."`). Like the file-input camera path above, it needs no browser microphone grant, so the gateway keeps `Permissions-Policy: microphone=()` when `speech.browserRecognition` is `false`.
-- **Opt-in in-page browser speech recognition (`speech.browserRecognition: true`):** unlike `<input type="file" capture="environment">`, browser Web Speech implementations (`SpeechRecognition` / `webkitSpeechRecognition`) require document-level `Permissions-Policy: microphone=(self)`. When `speech.browserRecognition` is `true`, only document HTML responses switch to `microphone=(self)` (keeping `camera=()` and all other directives unchanged), while API, SSE, problem, and static asset responses retain `microphone=()`. Because HTTP headers apply to the hosting document and cannot distinguish read-only **View** from writable **Control**, Control-only enforcement lives in the collaboration client (`browserRecognitionEnabled`, writable **Control** mode, and a healthy connection). Audio captured by in-page speech recognition is sent by the browser or OS to its speech provider **outside the encrypted OMP relay and before any prompt is sent**; no on-device processing claim is made, and the client displays the explicit disclosure `"Your browser or OS may send audio to its speech provider before any OMP prompt is sent."` before starting recognition. Recognizer configuration is bounded (`lang = navigator.language || "en-US"`, `continuous = true`, `interimResults = true`, one alternative, no auto-restart; watchdogs `10 s` start, `120 s` capture, `5 s` stop; review buffer capped at `128` segments, `8,000` code points, and `32 KiB`). No speech-to-text server, API key, or audio persistence exists in the gateway, and **Use text** inserts the reviewed draft into the composer without submitting (**Send** remains a separate explicit action). In a federated session, the home document's `speech.browserRecognition` setting is authoritative.
 ## 6. Capability handling
 
-Mandatory rules:
+**View** and **Control** links are bearer secrets. Mandatory rules:
 
-- keep capabilities only in OMP process memory, transient gateway query/launch-response memory, and
-  active browser client memory; the gateway never stores or caches them;
-- keep the memory-only registry metadata-only, structurally separate from secret-bearing responses;
-- never give capability-bearing objects generic serializers, inspectors, debug printers, or telemetry hooks;
-- minimize query/response references and drop browser references on launch disposal;
-- revalidate generation, access, and attention identity before releasing a queried capability;
-- never pre-render, prefetch, preload, or include capabilities in HTML, SSE, manifests, or hydration data;
-- release exactly one requested role through a no-store POST after an explicit user action;
-- prefer in-memory client bootstrap; do not use a URL path, query, fragment, window name, DOM attribute, clipboard, cookie, Local Storage, IndexedDB, Cache Storage, service-worker message, BroadcastChannel, notification, or crash/error SDK;
-- suppress access/body tracing for launch endpoints;
-- disable third-party runtime scripts, analytics, telemetry, remote fonts, and source-map upload services;
-- use generated canary capabilities for tests, never real user links.
+- Allow capabilities to exist only in the live OMP process, authenticated per-host query and launch-request memory, one `no-store` launch response, and volatile collaboration-client JavaScript memory; the gateway fetches each capability from OMP at launch time and never stores or caches it, even in the gateway's session registry.
+- Keep capabilities out of files, databases, ordinary logs, diagnostics, tracing, metrics, crash reports, URLs, redirect locations, window names, DOM attributes, clipboards, cookies, Local Storage, IndexedDB, Cache Storage, service-worker caches or messages, `BroadcastChannel`, notifications, analytics, third-party assets, screenshots, recordings, issue fixtures, source-map services, and CI artifacts.
+- Keep the gateway's memory-only session registry metadata-only and structurally separate from transient launch responses; never give capability-bearing objects generic serializers, inspectors, debug printers, or telemetry hooks.
+- Session-list and SSE responses contain metadata only; never pre-render, prefetch, preload, or include capabilities in HTML, SSE, manifests, or hydration data.
+- Fetch and release at most one requested role through a `no-store` `POST` after an explicit **View** or **Control** action, including the expected `generation` (OMP's counter that advances when a session is replaced) and revalidating generation, access, and attention request identity so stale cards fail rather than receiving a newer capability.
+- Transfer capabilities to the same-origin pinned client in memory, minimize query and response references, drop browser references on launch disposal, and suppress access and body tracing on launch endpoints.
+- Keep runtime assets first-party (no third-party scripts, analytics, telemetry, remote fonts, or CDNs) and use generated canary capabilities for tests, never real user links.
 
-The embedded `v18.12.6` client keeps the same capability boundary across coalesced renders.
-Request trays use that same in-memory bootstrap and mount exactly one client. Expanding reparents
-the existing shell; it neither fetches another capability nor creates another React root. Tray
-descriptors, DOM attributes and history state never contain capability material. Native modal
-close requests consume Back without tray history entries; only promotion replaces the route with
-`/client/`. Closing disposes the client synchronously. The bfcache resume intent retains only the
-metadata binding and full/tray presentation, then reacquires a fresh capability after revalidation.
-Both one-shot and streaming-tail Markdown route links and image sources through the same browser-URL
-scheme sanitizer (HTTP(S)/relative only for images); raw HTML stays escaped and KaTeX emits MathML
-with `trust: false` and `maxSize: 100`.
-Only pure TypeScript parser sources are vendored, with no pi-utils/pi-natives runtime dependency.
+JavaScript strings cannot be reliably zeroized; minimize lifetime, copies, closures, global state, and references instead of claiming memory erasure.
 
-`inputRequired` and optional boolean `busy` are the accepted host attention/activity signals.
-Missing/null activity is unknown, never idle or completion. The gateway may
-derive an opaque random request ID and receipt timestamp in memory for each false-to-true
-transition, expose them in list/SSE and routing URLs, and destroy them on clear, removal, expiry, or
-generation replacement. They are metadata, not authorization. Prompt text, options, answers, and
-transcript content remain prohibited unless a later OMP snapshot contract explicitly introduces a
-bounded plain-text preview contract; the current implementation always uses the boolean fallback.
+The pinned client ([Embedded integration](../packages/collab-client/README.md#embedded-integration)) keeps this capability boundary across coalesced renders and request-tray expansion: expanding reparents the mounted shell without fetching a second link, tray descriptors, DOM attributes, and history state hold no capability, closing or `pagehide` disposes synchronously, and bfcache resume revalidates metadata first ([OMP Sessions PWA](ARCHITECTURE.md#14-omp-sessions-pwa)).
 
-The PWA may persist two bounded, non-secret local routing record types under `localStorage` keys
-`omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2`: an exact source-qualified held ask
-`(sourceId, sourceOrigin, instanceId, requestId, heldAt)`, and a generation-scoped dismissed session
-`(sourceId, sourceOrigin, instanceId, generation, dismissedAt)` (migrating legacy v1 keys to the local
-source and dropping unconfigured or re-pointed sources at bootstrap). It must reject malformed,
-oversized, non-canonical, or excess records (100 items / 512,000 bytes max) and must never persist
-the composite in-memory `SourceKey`, session labels, paths, models, prompt content, transcript
-content, or capabilities. Holding does not change authoritative attention or badge counts. Dismissal
-is only a reversible local hide of a non-attention row: it makes no network request and does not stop
-OMP. Authoritative ask changes clear holds; removal, generation replacement, or attention clears
-dismissals. Transport failures clear neither. A held ask on the local source may close only a home
-notification with the matching instance tag and request ID; holding an ask on a remote fleet source
-never enumerates or closes home notifications even when `instanceId` collides.
-The separate first-run key `omp.sessions.first-run.v1` stores only
-`{ version: 1, step: "alerts" | "modes" | "done", updatedAt: ISO }` (128 characters maximum).
-It contains no host/session identifiers, labels, permissions or capabilities. Missing means fresh;
-malformed, unsupported, oversized or inaccessible records suppress the introduction. The flow
-reuses the existing notification opt-in control and never requests a capability or notification
-permission merely by opening or advancing a step.
-After an explicit permission/subscription action, the gateway may persist a user-only VAPID key
-pair, bounded browser subscription set, authenticated identity, and per-device `private`,
-`session`, or `preview` choice. It assembles encrypted push presentation at send time. `private`
-uses the fixed title and no body; `session` may add bounded session/project labels; `preview` may
-also add a bounded preview but falls back to `session` until such data is available. The UI must
-warn that visible notification text can persist in notification history, screenshots, and
-wearables. A tap hands the notification's metadata-only data to an open same-origin page over a
-worker `MessageChannel`, or opens `/collab/:instanceId?request=:requestId` when no page accepts.
-Either way the page fetches a current authenticated snapshot, requires the exact current attention
-identity and Control availability, and then uses the existing generation-bound no-store launch
-POST; the worker never navigates an open page. Activity-stop notification data
-contains only version, type, instance ID, and generation. Its strict route is scrubbed before
-networking and resolves only to View for that same generation after authentication; it carries no
-request ID and cannot be used as an ask/Control intent. Stop detail obeys the same server-side
-privacy choice, with no preview content. No activity state is persisted.
-Never put a collaboration capability in a payload, notification data, route, history,
-service-worker message, persisted push state, badge, or request identifier.
-Web Push subscriptions, VAPID keys, notification tags, app badges, and service-worker tap routes belong to the gateway that served the PWA. Remote fleet targets never receive or share push state, and a remote host reaches that worker only through the coordinator's fleet notifications below.
+Settled and streaming Markdown pass links and image sources through the browser URL scheme sanitizer (HTTP(S) and relative only for images), raw HTML stays escaped, KaTeX renders MathML with `trust: false` and `maxSize: 100`, and only pure TypeScript parser sources are vendored without `pi-utils` or `pi-natives` runtime dependencies.
 
-JavaScript strings cannot be reliably zeroized. Minimize lifetime, copies, closures, global state, and persistence instead of claiming memory erasure.
+`inputRequired` and optional boolean `busy` are the only accepted host attention and activity signals (`null` or missing activity is unknown, never idle or completion).
+
+Each `false`-to-`true` `inputRequired` transition derives an opaque in-memory request ID and receipt timestamp exposed as routing metadata (never authorization) and destroyed on clear, removal, expiry, or generation replacement; prompt text, options, answers, and transcript content remain prohibited because stock OMP snapshots supply no preview ([Protocol](PROTOCOL.md)).
+
+Keep `SourceKey` (`id + "\0" + origin`) strictly as a dashboard-side in-memory discriminator; never concatenate it into an OMP `instanceId` or send it on the wire.
+
+Device-local triage storage (`omp.sessions.held-asks.v2`, `omp.sessions.dismissed.v2`), `omp.sessions.first-run.v1`, and `omp.sessions.creation-prefs.v1` record bounded `sourceId` and `sourceOrigin` or step choices without `SourceKey`, labels, paths, models, prompts, transcripts, or capabilities ([Browser storage](../apps/web/README.md#browser-storage)).
+
+Local Hold and Hide never stop OMP or alter authoritative attention counts, remote Hold never enumerates or closes home notifications even when `instanceId` collides, and first-run trays never request capabilities or permissions automatically ([Local triage storage](ARCHITECTURE.md#local-triage-storage)).
+
+Web Push, VAPID keys, notification tags, app badges, and service-worker tap routes belong to the gateway serving the PWA; remote hosts reach its worker only as [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) fleet notifications below.
+
+After an explicit opt-in, `push-state.json` stores only the user-only VAPID key pair, bounded browser subscriptions, authenticated identity, and `private`, `session`, or `preview` detail choice (`private` omits body text; `preview` falls back to `session`; visible text can persist in notification history, screenshots, and wearables).
+
+Activity-stop notifications carry only version, type, optional remote source binding, `instanceId`, and `generation`, resolving only to **View** for that generation.
+
+Attention and stop taps scrub the routing URL before networking, never navigate an open page from the worker, and revalidate live state before calling the `no-store` launch `POST` ([Notification lifecycle](ATTENTION_SPEC.md#notification-lifecycle), [Background alerts and activity stops](ARCHITECTURE.md#background-alerts-and-activity-stops)).
+
+Never put a capability in a push payload, notification data, route, history entry, service-worker message, persisted push state, badge, or request identifier.
 
 ### Fleet notifications
 
-[ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) adds
-one machine trust relationship and keeps every browser trust relationship browser-direct:
+Fleet notifications ([ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator), background alerts for remote hosts) make the gateway serving the PWA the sole coordinator that sends every push; never share VAPID keys or add a second coordinator.
 
-- **Both administrators opt in.** A coordinator pulls only sources listed in
-  `notifications.sources`; a source serves only coordinators listed in
-  `notifications.coordinators` whose origins are also trusted dashboard origins. A trusted
-  dashboard origin alone still grants no machine access.
-- **The owner authorizes each source directly.** Grant creation, renewal, and revocation at a
-  source authenticate the caller from that source's own Serve identity and accept only the exact
-  coordinator origin. No daemon forwards, synthesizes, or relies on `Tailscale-User-Login` for
-  another host.
-- **The credential is narrow.** The coordinator holds a 256-bit secret per grant; the source holds
-  only its SHA-256 verifier. The bearer credential reaches only `GET /api/v1/notification-feed`,
-  which refuses browser requests (`Origin` or `Sec-Fetch-*` present), keeps the Serve-only loopback
-  and second-hop checks, compares in constant time, and rechecks coordinator configuration,
-  trusted origin, owner allowlist, and expiry on every connection and event. It cannot list
-  sessions through the browser API, fetch View or Control links, create sessions, change
-  subscriptions, or choose a URL; the coordinator connects only to the configured origin and refuses
-  redirects.
-- **The feed is metadata only and projected explicitly.** It carries instance identifiers,
-  generations, actionable request identifiers, live stop edges, an owner digest, and the grant
-  expiry. Titles, working directories, models, previews, option counts, timestamps, and
-  capabilities are never projected, so neither the coordinator nor the phone receives them from a
-  remote source.
-- **Fan-out is owner- and device-bound.** A remote event reaches only push subscriptions owned by
-  the grant's owner (verified against the feed's owner digest), still allowlisted at the
-  coordinator, and selecting that source. Two owners' grants or devices never mix.
-- **State stays private and small.** Grant secrets live only in the coordinator's private
-  `fleet-notifications.json`, beside each recipient's selection and the identifiers (binding,
-  instance, generation, request) of at most 256 asks it alerted and has not cleared, kept so a
-  restart can send exact clears. Verifiers live in the source's private `notification-grants.json`.
-  Neither file holds titles, paths, previews, prompts, or capabilities; both fail closed when
-  corrupt. Diagnostics stay numeric or boolean.
+Residual risks apply even when configured safely: a source (remote host) naming a coordinator discloses enrolled owners' session identifiers and ask timing to that coordinator, a stolen coordinator grant secret reads the same metadata until revocation or 30-day expiry, pushes accepted by a push service cannot be recalled after revocation, and fleet alerts pause while the coordinator is down.
 
-Residual risks: a source that names a coordinator discloses enrolled owners' session identifiers
-and ask timing to that coordinator; a stolen coordinator secret reads the same metadata until
-revocation or expiry (at most 30 days without renewal); pushes already accepted by a push service
-cannot be recalled after revocation; and fleet alerts stop while the coordinator is down.
+- Both administrators opt in: a coordinator pulls only sources listed in `notifications.sources`, and a source serves only coordinators listed in `notifications.coordinators` whose origins are also in `http.trustedDashboardOrigins` (trusted dashboard origin status alone grants no machine access).
+- Each owner grants each source browser-direct: grant creation, renewal, and revocation at a source authenticate the caller from that source's own Serve identity and accept only the exact coordinator origin; no daemon forwards, synthesizes, or trusts `Tailscale-User-Login` for another host.
+- A grant secret is stored only at the coordinator (`fleet-notifications.json`, 256-bit secret; the source stores only its SHA-256 verifier in `notification-grants.json`) and authorizes only `GET /api/v1/notification-feed`, a non-CORS machine route that refuses browser requests (`Origin` or `Sec-Fetch-*` present) and never forwards or trusts identity headers.
+- `GET /api/v1/notification-feed` enforces the Serve loopback and second-hop checks, compares verifiers in constant time, refuses redirects, rechecks coordinator, trusted origin, owner allowlist, and expiry on every connection and event, and cannot list browser sessions, fetch **View** or **Control** links, create sessions, or change subscriptions.
+- The feed projects only instance IDs, generations, actionable request IDs, live stop edges, an owner digest, and grant expiry; fleet pushes (`version: 3`) carry no titles, working directories, models, previews, timestamps, or capabilities ([Fleet notifications](PROTOCOL.md#fleet-notifications), [Fleet notification source](ARCHITECTURE.md#fleet-notification-source)).
+- Fan-out stays owner- and device-bound: remote events reach only push subscriptions owned by the grant's allowlisted owner (verified against the feed's owner digest) and selecting that source, two owners' grants or devices never mix, both private JSON files (including the coordinator's bounded 256-ask clear tracker) fail closed when corrupt without holding labels, paths, prompts, or capabilities, and diagnostics stay numeric or boolean.
 
 ### Opt-in creation and first-task drafts
 
-[ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) permits creation
-only from administrator-authored IDs in `config.tern` resolving to approved canonical working
-copies (`workingCopies[].path` equal to its `realpath`), absolute executables (`tern.executable`
-and `profiles[].argv[0]`), literal `profiles[].argv` arrays, and a complete explicit CLI
-environment (`profiles[].env`). The browser supplies none of those execution values. Never merge
-the daemon's `process.env` or use a shell, task text, or labels as command input. Tern's pane
-environment (`collab.autoStart = control` publishing into `omp.discoveryDir`) is a separate
-operator prerequisite, not an assumed environment-forwarding mechanism.
+Opting into session creation in Tern (a terminal execution environment for stock OMP; [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)) grants stronger trust than directory or launch access: an opted-in target with `tern` configured trusts JavaScript on its own origin and every origin in `http.trustedDashboardOrigins` to create processes from its configured profiles under an allowlisted Tailscale identity, not merely read metadata or open existing sessions.
 
-**Creation is stronger trust than directory/launch access:** a target with `tern` configured
-trusts every `http.trustedDashboardOrigins` entry's JavaScript to start processes from its
-approved profiles using the caller's allowed Tailscale identity. Removing that trust prevents
-further API requests, but does not cancel accepted work, kill a started OMP process, or revoke
-an already-issued relay capability. Browser Close/abort stops watching only. Neither an
-uncertain CLI result nor restart may trigger automatic re-spawn.
+Removing dashboard trust blocks further API requests without cancelling accepted work, killing a started OMP process, or revoking an already-issued relay capability.
 
-Creation options expose only IDs/labels and an opaque per-daemon revision; status exposes only
-state/timestamp, closed errors, and an OMP instance/generation when ready. They carry no
-capabilities or execution paths. The private owner-scoped ledger contains operation/request
-IDs, normalized owner identity, timestamps, state, optional block ID and ready binding, and closed
-errors, never labels, paths, argv/env, prompts, capabilities, raw CLI output, or session-file
-paths. Its 64-record/24-hour/512-KiB bounds and durable-before-spawn checkpoints do not make it a
-capability store. Corruption or failed private durable writes disable creation without deleting
-evidence or affecting ordinary discovery/launch.
-
-The optional First task (8,000 code points/32 KiB maximum) never enters a gateway request,
-operation ledger, URL, log, diagnostic, notification, or browser storage. A volatile holder binds
-it to the exact source/instance/generation. The client's `takeInitialPromptDraft` drains it once
-only into an empty ordinary composer in live writable Control with a healthy relay, no active
-Ask, and no photo draft/pending photo send; it never overwrites an existing draft or sends.
-Cancel, changed binding, authorization loss, pagehide, or shell disposal clears the holder;
-background suspension alone may retain the unsent draft in that page's suspended flow.
-`localStorage` key `omp.sessions.creation-prefs.v1` may store at most eight source-qualified
-choice records (`sourceId`, `sourceOrigin`, `projectId`, `workingCopyId`, `profileId`, `updatedAt`)
-in a versioned 16-KiB record, validated against fresh options. It stores no labels, execution
-values, draft text, operation IDs, client-operation IDs, or capabilities.
+- Creation uses administrator-authored `argv` arrays and an explicit complete CLI environment in `config.tern` (`workingCopies[].path` equal to its `realpath`, absolute `tern.executable` and `profiles[].argv[0]`, literal `profiles[].argv`, and `profiles[].env`).
+- Never merge `process.env`, invoke a shell, or accept browser-selected executables, paths, `argv`, `env`, labels, or task text; `collab.autoStart = control` publishing into `omp.discoveryDir` inside Tern is a separate operator prerequisite.
+- Persist private capability-free intent to `<stateDir>/session-creations.json` before spawning; uncertainty or daemon restart never permits automatic re-spawn, and browser cancellation (**Close** or request abort) stops watching, not the process.
+- Creation options expose only choice IDs, labels, and an opaque per-daemon revision; status responses and the owner-scoped `session-creations.json` ledger (64 records, 24 hours, 512 KiB max) record only operation and request IDs, normalized owner identity, timestamps, state, optional local block ID, ready `instanceId` and `generation`, and closed errors — never labels, paths, `argv`, `env`, prompts, raw CLI output, session-file paths, or capabilities.
+- Ledger corruption or failed private writes disable creation without deleting evidence or affecting ordinary discovery and launch ([Session creation state machine](PROTOCOL.md#session-creation-state-machine), [Creation ledger recovery](OPERATIONS.md#creation-ledger-recovery)).
+- An optional **First task** draft (8,000 code points / 32 KiB max) stays in volatile browser memory bound to the exact source, `instanceId`, and `generation`, and never enters gateway requests, ledgers, URLs, logs, diagnostics, notifications, or `localStorage`.
+- `takeInitialPromptDraft` drains that draft once into an empty ordinary composer in live writable **Control** (healthy relay, no active Ask, and no photo draft or in-flight photo send) without auto-sending; cancellation, binding change, authorization loss, `pagehide`, or shell disposal clears the holder ([Embedded integration](../packages/collab-client/README.md#embedded-integration)).
 
 ## 7. Browser controls
 
-Representative response policy; adapt CSP hashes/nonces to the build and configured relay allowlist:
+Every API, problem, and bootstrap response carries this response policy from `apps/gateway/src/http-policy.ts` (shipped builds use `'self'` without inline script or style hashes or nonces):
 
 ```http
 Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' wss://my.omp.sh; manifest-src 'self'; worker-src 'self'
@@ -421,501 +187,123 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Resource-Policy: same-origin
 Referrer-Policy: no-referrer
 X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
 Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()
+Cache-Control: no-store, max-age=0
+Pragma: no-cache
 ```
-Document HTML responses extend `connect-src` with each configured `fleet.targets[].origin` (`http.trustedDashboardOrigins` is never added to `connect-src`) and switch `Permissions-Policy` to `microphone=(self)` only when `speech.browserRecognition` is `true`. API, SSE, problem, and static asset responses always keep `connect-src 'self' wss://my.omp.sh` and `microphone=()`.
 
-Additional requirements:
+Additional browser and HTTP requirements (`apps/gateway/src/http-policy.ts`, `apps/gateway/src/http.ts`, `apps/gateway/src/static.ts`):
 
-- exact `Origin` validation on `POST` and any future WebAuthn enrollment/assertion endpoints;
-- validate `Sec-Fetch-Site` when supplied (`same-origin` on same-origin mutations; `same-site` or `cross-site` accepted on `POST /api/v1/sessions/:instanceId/launch`, `POST /api/v1/session-creations`, and the three fleet grant `POST` routes **only** when the request `Origin` header is an exact match in `http.trustedDashboardOrigins` (for grant routes also in `notifications.coordinators`) and `Content-Type` is exactly `application/json` — missing Fetch Metadata is never permission to skip exact `Origin` validation);
-- no wildcard CORS and no `Access-Control-Allow-Credentials`;
-- **federated dashboard origin exception ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), extended by ADR-043 and ADR-048):** when `http.trustedDashboardOrigins` is empty (default), no cross-origin API access is permitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` before identity checks. An explicitly trusted dashboard may read metadata, request existing View/Control capabilities, when the target opts in create from approved profiles, and, when the dashboard is also a configured notification coordinator, create, renew, or revoke its own fleet grants, all under the viewer's own authorized Tailscale identity. Only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), `POST /api/v1/notification-grants`, `POST /api/v1/notification-grants/:grantId/renew`, `POST /api/v1/notification-grants/:grantId/revoke`, and their authenticated `OPTIONS` preflights may emit `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin`; preflights consume no mutation rate-limit tokens. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/notification-feed`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin. Removing dashboard trust blocks further cross-origin API requests (and a readable `403` disposes the remote shell and shows `Access withdrawn`), but does not cancel accepted creation, kill a process, or revoke an already issued OMP relay capability;
-- all metadata rendered as text, never unsanitized HTML;
-- strip control/bidi characters or display them safely in titles/paths;
-- cap label length and session count;
-- service worker caches only explicitly listed, queryless, content-hashed static assets (the precached app shell with its two upright text faces plus the pinned collaboration-client module and stylesheet, and first-party-served Private Use Area font chunks and the italic text face cached lazily on first use — never a capability-bearing response) and explicitly bypasses cross-origin requests, `/api/`, `/internal/`, `/client/`, `/collab/`, `/update/`, navigation, query-bearing URLs, and all non-GET requests;
-- every web font is self-hosted: Geist and Geist Mono latin subsets for text and a Symbols Nerd Font Mono subset for Private Use Area glyphs, loaded from the gateway under the existing `default-src 'self'` policy with no remote font requests and system fonts as the fallback;
-- service worker Push handling accepts exact `attention`/`clear`/`activity_stop` envelopes, uses one per-instance tag, updates only the bounded app badge count, and never fetches or receives a collaboration capability;
-- transient directory transport failure retains the last authenticated metadata only in volatile page memory, marks it stale with the last-fresh timestamp, and disables no actions solely because SSE disconnected; authorization failure clears it;
-- no capability in Redux/React Query persistence, devtools globals, error boundaries, replay tools, performance marks, history state, or directory snapshots;
-- external links use `rel="noopener noreferrer"`;
-- production builds disable framework devtools hooks where practical;
-- reload returns to the metadata directory.
-- an activated shell update never navigates a client; the page reloads itself only while no launch is pending, no routed notification awaits its snapshot, and no collaboration client is mounted (ADR-018 amendment). An activation by an earlier worker, such as one restored by rollback, may still navigate a client to the no-store `/update/` bootstrap, which the new document synchronously scrubs to `/`.
-
-If relay origins are configurable, generate `connect-src` only from administrator-controlled validated origins.
+- API, creation, launch, `application/problem+json`, and `GET` bootstrap responses (`/client/`, `/update/`, and `/collab/`) are `no-store` (`Cache-Control: no-store, max-age=0` and `Pragma: no-cache`); `index.html` and unhashed shell files are `no-cache`, and content-hashed `/assets/` files are immutable.
+- Document HTML responses (`status < 400`, `text/html`) extend `connect-src` only with configured `fleet.targets[].origin` entries (`http.trustedDashboardOrigins` is never added to `connect-src`) and switch `Permissions-Policy` to `microphone=(self)` only when `speech.browserRecognition` is `true`; non-document responses retain `connect-src 'self' wss://my.omp.sh` and `microphone=()`. If relay origins are configurable, generate `connect-src` only from administrator-controlled validated origins.
+- Validate exact `Origin` on state-changing requests (`POST`, `PUT`, and `DELETE`, plus any future WebAuthn enrollment or assertion endpoints) and evaluate `Sec-Fetch-Site` defensively (`requestHasValidMutationContext` requiring `http.publicOrigin` and `Sec-Fetch-Site` absent or `same-origin` on same-origin routes; missing Fetch Metadata never skips exact `Origin` validation).
+- On cross-origin launches, creations, and (when also listed in `notifications.coordinators`) fleet grant `POST` routes, `requestHasTrustedDashboardContext` requires an exact match in `http.trustedDashboardOrigins`, `Sec-Fetch-Site` absent or in `{same-site, cross-site}`, and exact `Content-Type: application/json`.
+- Do not use wildcard CORS or `Access-Control-Allow-Credentials`. Cross-origin admission ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), extended by ADR-043 and ADR-048) is bounded to at most 8 `http.trustedDashboardOrigins` (`fleet.targets` is bounded to 7 remote targets, 8 sources total with `local`) and exposed only on the cross-origin routes and authenticated `OPTIONS` preflights specified in [Cross-origin access](PROTOCOL.md#cross-origin-access).
+- `/api/v1/events`, `/api/v1/push/*`, `/api/v1/notification-feed`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
+- Unconfigured fleet notification routes (`/api/v1/notification-feed`, `/api/v1/notification-grants`, and `/api/v1/push/fleet/`) return `404` first; on every other `/api/` route except loopback `GET /api/v1/health`, any foreign non-admitted `Origin` is refused with `403` and no CORS headers before identity checks.
+- Admitted cross-origin responses emit `Access-Control-Allow-Origin: <exact origin>` and `Vary: Origin`, while admitted `204` `OPTIONS` preflights emit `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers` and consume no mutation rate-limit tokens.
+- Render all metadata as text (never unsanitized HTML), strip or safely display control and bidi characters in titles and paths, cap label length and session count, use `rel="noopener noreferrer"` on external links, and disable framework devtools hooks in production builds where practical.
+- Keep runtime assets first-party: all web fonts are self-hosted subsets under `default-src 'self'` with system fallbacks, and no analytics, remote fonts, third-party scripts, source-map upload services, or CDNs are used ([Appearance](../apps/web/README.md#appearance)). Never place capabilities in state persistence, devtools globals, error boundaries, replay tools, performance marks, history state, or directory snapshots.
+- The service worker caches only immutable application-shell assets and bypasses cross-origin, navigation, query-bearing, non-`GET`, `/api/`, `/internal/`, `/client/`, `/collab/`, and `/update/` collaboration-client bootstrap traffic; Push handling accepts only validated `attention`, `clear`, and `activity_stop` envelopes, updates one per-instance tag and the bounded app badge, and never fetches or receives a capability ([Service worker](../apps/web/README.md#service-worker)).
+- Activated shell updates claim clients without navigating them, so an open page reloads itself only while idle with no in-flight launch, routed notification, or mounted collaboration client ([ADR-018](DECISIONS.md#adr-018--activate-pwa-upgrades-automatically-without-interrupting-live-collaboration)).
+- An earlier rollback-restored worker may navigate to the `no-store` `/update/` bootstrap, which synchronously scrubs to `/`, and reloads return to the metadata directory ([Shell updates and caching](ARCHITECTURE.md#shell-updates-and-caching)).
+- Transient directory transport failure retains the last authenticated metadata only in volatile page memory marked stale; authorization failure clears it immediately ([Availability model](ARCHITECTURE.md#availability-model)).
 
 ## 8. Tailnet authorization
 
-In `auth.mode = "tailscale-serve"`:
+In `auth.mode = "tailscale-serve"`, request authorization enforces these rules in order:
 
-1. require `Tailscale-User-Login`;
-2. decode/normalize only according to documented header encoding rules;
-3. compare against an exact configured allowlist;
-4. reject wildcard defaults;
+1. require `Tailscale-User-Login` on the verified Serve loopback path;
+2. normalize `Tailscale-User-Login` with NFC normalization, trimming, and lowercasing (`1`–`320` characters, rejecting NUL, CR, LF, and commas; `apps/gateway/src/auth.ts`);
+3. compare against the exact configured `auth.allowedLogins` allowlist;
+4. reject wildcard defaults and empty production allowlists;
 5. treat external users who accepted a device share as ordinary identities requiring explicit allowlisting;
-6. optionally display the current identity without persisting it;
-7. log only numeric or boolean fields, never identity strings or hashes;
-8. maintain a separate `dev-localhost` mode that starts only with an explicit flag and accepts loopback clients only.
+6. optionally display the active login without persisting it;
+7. log only numeric or boolean fields, never identity strings or hashes.
 
-Tailnet grants and application allowlisting are both required defense layers. Future device-specific policy may use posture or Tailscale app capabilities, but must have tests and must not fall back to “any tailnet member.”
+A separate `dev-localhost` mode (`--dev-localhost`) accepts loopback clients and the configured loopback origin only, rejecting non-loopback sources. Tailnet grants and application allowlisting are both required defense layers; any future device-specific policy using posture or Tailscale policy app capabilities must have tests and must never fall back to "any tailnet member."
 
 ## 9. Local discovery and queries
 
-Stock mainline OMP `>= 18.1.20` owns the discovery/query endpoint, introduced by [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20).
-The gateway is a reader and query client, not a publisher server. Required boundaries:
+Stock mainline OMP `>= 18.1.20` owns the collaboration controller and local discovery directory ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, carried by [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20)); the gateway is a read-only discovery reader and query client, never a publisher server:
 
-- read only private, current-user-owned discovery entries and endpoints; reject symlinks and
-  unsafe ownership or permissions;
-- use each entry’s endpoint and per-host query token, never a guessed socket path;
-- bound newline-framed requests, responses, connection time, and discovery entries;
-- never write, rename, or unlink OMP-owned files or sockets;
-- fetch metadata with `snapshot`, capabilities only with an explicit generation-bound `link`;
-- never log query tokens, raw replies, transport error strings, or capability-bearing parse errors;
-- treat only `ENOENT`/`ECONNREFUSED` as conclusive host death; permission, timeout, resource,
-  and wire failures retain existing metadata until TTL expiry;
-- reject stale generations and unavailable roles rather than substituting a newer or stronger link.
+- The gateway only reads OMP's private, current-user-owned discovery directory and queries each host's published endpoint: reject symlinks and unsafe ownership or permissions, never write, rename, or unlink discovery files or sockets, and never derive the endpoint from a filename.
+- Per-host discovery tokens authorize queries to OMP (private because they permit querying links, though not collaboration capabilities themselves); bound newline-framed requests, responses, connection timeouts, and discovery entries, and never log discovery tokens, raw replies, transport error strings, or capability-bearing parse errors.
+- Fetch metadata with `snapshot` and fetch capabilities only at launch time with an explicit generation-bound `link`, rejecting stale generations and unavailable roles rather than substituting a newer or stronger link.
+- The registry is metadata-only and memory-only: a daemon restart begins empty, polling repopulates it (`registry.heartbeatSeconds` default 10 seconds; `registry.ttlSeconds` default 35 seconds, exceeding twice the interval on a monotonic receipt clock), and no capability store exists.
+- Only `ENOENT` or `ECONNREFUSED` proves a queried host dead; timeouts, permission or resource errors, and wire errors retain its card until TTL expiry, while absence from discovery removes it ([Host poller and launch broker](ARCHITECTURE.md#12-host-poller-and-launch-broker)).
+- Tern remains an execution environment for stock OMP ([ADR-038](DECISIONS.md#adr-038--tern-is-an-execution-environment-not-an-integration), narrowly amended by [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)): session identity stays OMP's `instanceId` and `generation` from OMP-native discovery, with no Tern discovery adapter, general control surface, `tsp.ts` reader, pane scraping, focus, attachment, keystrokes, or native handoff.
+- Opt-in creation reads only bounded `tern inspect --json` metadata, parses unsigned 64-bit IDs losslessly, rejects remote host tags at bit 56 or above, matches `omp_session_file` only by in-memory basename token without opening, statting, tailing, or scraping that JSONL file, and reauthorizes **Control** before `ready` and again at capability launch.
+- The gateway's private `readiness-token` proves managed loopback readiness to its CLI and `doctor` via an HMAC over a fresh 256-bit challenge and one-time startup instance nonce (rejecting generic health responses and older same-token processes), is never an OMP credential, and fails closed on failed rotation without restoring the prior token ([Staging, readiness proof, and activation](ARCHITECTURE.md#61-staging-readiness-proof-and-activation)).
+- For pre-`v0.4.0` `publisher-token` transitions, follow [Recover across the v0.3.0 boundary](UPGRADE_ROLLBACK.md#recover-across-the-v030-boundary).
 
-A discovery token is not a collaboration capability, but permits querying that host for links and
-therefore remains private. These controls reduce accidental and cross-user access; they are not a
-sandbox against same-user malware. The gateway has no capability store, even in memory.
-
-Opt-in Tern creation does not change these read-only discovery boundaries. It reads only bounded
-`tern inspect --json` metadata, parses unsigned 64-bit numeric IDs losslessly, rejects remote host
-tags at bit 56 or above, and requires one exact local block/pane match plus a unique fresh
-OMP-native binding. `omp_session_file` is used only for an in-memory basename token match; never
-open, stat, tail, or scrape that JSONL file. No focus/order/cwd/PID fallback, pane content,
-`tsp.ts`, keystrokes, or native handoff is allowed. Control is reauthorized before `ready` and
-again through the ordinary capability launch path.
-
-Service installation and `doctor` do not trust a generic loopback health response. The daemon
-returns an HMAC over a fresh 256-bit challenge using its private `readiness-token`; managed startup
-also binds the HMAC to a one-time instance nonce written into the new service definition. The CLI
-requires that exact nonce before activating the staged runtime, so an older same-token process
-cannot satisfy replacement readiness. This token belongs only to gateway/CLI readiness and is
-never provisioned to OMP. Token rotation validates the managed runtime first and never restores
-the prior token after replacement; a failed restart retains the fresh token and stops the service.
-
-Fork-era runtimes used a shared publication/readiness credential. Their recorded readiness and
-rollback results are historical, not proof that a mainline cutover can be reversed by changing
-only the gateway pointer; follow [UPGRADE_ROLLBACK.md](UPGRADE_ROLLBACK.md).
+These OS-permission and token controls reduce accidental and cross-user access; they are not a sandbox against same-user malware.
 
 ## 10. Lost phone and user presence
 
-Minimum guidance:
+Operators rely on these device and tailnet controls for lost-phone containment ([Lost phone and revocation](OPERATIONS.md#11-lost-phone-and-revocation)):
 
-- use Android device lock/biometrics;
+- use mobile OS device lock and biometrics;
 - require strong identity-provider authentication for Tailscale;
-- remove or expire a lost device promptly;
+- remove or expire a lost device promptly and stop active OMP collaboration rooms;
 - keep tailnet grants narrow;
 - persist no session capability in the PWA.
 
-Proposed stronger Control protection (WebAuthn, not currently implemented):
-
-Passkey enrollment and per-launch WebAuthn verification are not currently implemented. If added in
-a future release, they must enforce the following contract and still do not replace device
-revocation, screen lock, or tailnet policy:
+Optional stronger **Control** protection ([ADR-008](DECISIONS.md#adr-008--optional-webauthn-gate-not-native-biometrics), proposed and unimplemented): passkey enrollment and per-launch WebAuthn verification are not part of the gateway. Any future implementation must enforce the following contract without replacing device revocation, screen lock, or tailnet policy:
 
 - enroll a WebAuthn credential with user verification;
-- require a fresh assertion for each Control launch or a very short verified window;
+- require a fresh assertion for each **Control** launch or a very short verified window;
 - bind challenge, operation, origin, instance, generation, and mode server-side;
 - store only public credential material;
-- never treat a successful View action as authorization for Control.
+- never treat a successful **View** action as authorization for **Control**.
 
 ## 11. Logging, diagnostics, and test artifacts
 
-Allowed at normal verbosity:
+Gateway log fields are numeric or boolean only; never log strings from host queries or metadata (`apps/gateway/src/logger.ts`). At normal verbosity, the shipped gateway allows only:
 
 - fixed event names selected by the implementation, not data from a host or request;
 - numeric protocol versions, generations, counts, and durations;
-- boolean success/failure and health fields.
+- boolean success, failure, and health fields.
 
-All gateway log fields are numeric or boolean. Never attach string-valued identifiers, hashes,
-paths, error messages, metadata, or serialized query objects.
-
-The stable qualification CLI's private stderr separately retains developer-authored Error messages
-and stacks along cause/AggregateError edges. Readiness's private `browser-substep.json` retains the
-failed browser step, error message, CDP method and elapsed time. Both use the repository's identifier
-and capability rules to redact private identifiers and withhold capability-bearing lines, never
-serialize arbitrary error properties, and never enter receipts, gateway logs or public artifacts.
-Repeated/cyclic errors and traversal-limit exhaustion are marked explicitly rather than recursed.
-Message/stack ceilings are 4/16 KiB respectively; oversized fields are withheld without retaining
-partial secrets or scanning unbounded provider bodies. Redaction/truncation is explicit and the
-complete serialized diagnostic is capped below 256 KiB. Diagnostic-retention failures stay in
-private causes, not the sanitized failure graph; concurrent execution expiry cannot replace a
-browser failure or discard its cause.
-
-Effectful Pixel readiness reads GCM only after acquiring its lease and checkpointing a restorable
-device baseline. A proven disconnection authorizes one bounded Wi-Fi off/on cycle, not changes to
-Tailscale, DNS, exit-node, firewall, battery or notification policy. The 30-second reconnect wait
-does not enlarge delivery budgets; execution cancellation and normal radio restoration remain
-authoritative. An exhausted GCM remedy never authorizes an automatic campaign retry. Late
-observations and any malformed or duplicate connection line cannot establish readiness. Receipts
-contain only `gcmConnected`/`gcmRemedyApplied` booleans; all GCM exits and subsequent readiness
-errors retain those facts and the censored private sample. Successful Push hands the sample to
-its enclosing readiness owner as separate process-local context; observations are retained before
-post-action persistence and deadline checks, without serializing that context into the receipt.
-The sample allowlists the client-connected
-flag and an `OFF` or bounded duration reconnect alarm; malformed fields become `unavailable`.
-Device IDs, app/message IDs, network names, endpoints and the rest of `GcmService` output are
-never retained. `AndroidAdbError` in `scripts/android-device.ts` withholds command stdout/stderr
-at construction, before the bounded, identifier/capability-scanned private diagnostic formatter;
-it does not copy provider output into an Error message and rely on redaction afterward.
-
-These are access-restricted local diagnostics (0700 parent directory, 0600 files), not sanitized
-publication surfaces. Producer-authored Error messages are the authorship boundary: producers
-must not embed secrets or unreviewed response bodies. Identifier/capability scanning is defense
-in depth, not a general-purpose body classifier. A short capability-free response body copied
-into an Error message is retained in these private sinks; it must never enter receipt evidence,
-gateway structured telemetry or public artifacts. Operators must inspect and redact private
-diagnostics before sharing them.
-
-Qualification explicitly supplies `--qualification-log-dir`; an environment variable alone never
-enables daemon retention. Ordinary installations are unchanged. The sink accepts only closed event
-names/fields, finite numbers and booleans (plus the fixed envelope timestamp/level/name), and retains
-four files of at most 256 KiB. The existing absolute destination must be current-user-owned, mode
-0700, with no symlink components; files are single-link, current-user-owned 0600 regular files.
-Unsafe startup fails. Each synchronous burst durably invalidates the existing private health inode
-before touching log data; its microtask commit flushes the bounded current file and commits the exact
-event index and first retained index. Rotation flushes the file being moved; per-event appends do not require per-event fsync.
-An interrupted or failed burst never publishes success. Writer startup and final collection acquire
-the same exclusive private in-directory claim. The writer makes its claim durable before logging;
-a failed close retains it even if a closed-looking lease write reached the cache and every health
-invalidation fails. Graceful teardown drains admitted HTTP handlers (not just sockets) and every other
-event producer, then fsyncs final health, closed lease and directory state. Claim unlink is the last
-fallible close step. Restart and collection reject any held claim; abrupt death or a claim unlink
-that did not survive a crash requires explicit reset, never automatic repair. Writes after close are
-discarded with a bounded in-memory drop count, not thrown into a late handler. All state
-stays inside the accepted service writable location. Restart and collection require
-contiguous records in oldest-to-newest file order, beginning at index 1 unless the committed rotation
-boundary explains the prefix. Missing/truncated retained files and record reordering are failures.
-Rate-limited discovery and authorization events use the same closed vocabulary. Raw daemon
-stdout/stderr remain discarded independently of structured retention, proven on the gateway's host.
-Install/rollback/repair only forward the logging option to runtimes advertising `structured-v1`;
-older installed runtimes omit it rather than receiving an unsupported command-line option.
-
-Push events retain only numeric sequence and opaque request alias, kind flags, subscription counts,
-durations, and HTTP status. Qualification-only aliases are allocated from the next retained-log append
-index and mapped to exact session/generation/request tuples only in process memory. They are not
-identity encodings, hashes, or keys, and retained append indices prevent reuse across daemon restarts
-in the same job. The existing authenticated read-only session list exposes the optional
-`qualificationPushAlias` only for the exact current ask; ordinary responses omit it. Before any re-arm,
-the runtime re-fetches the owned fixture snapshot and requires its alias to match queue, send and
-failure evidence. The matching outbound clear acknowledgement is required before issuing the new ask.
-Immediately before transport, a fresh snapshot must still have the original instance and generation,
-controllability, no active ask, and matching request/alias state. The existing private fixture
-acknowledgement carries its OMP session ID into a guarded command; the extension checks that ID
-synchronously before showing the ask. This detects a session switch, not a same-session host-generation
-rotation between the runtime's check and the extension's mutation; the cross-process check is not atomic.
-Provider acknowledgement is acceptance, not phone presentation. Collector windows use event indices
-and one exact request alias; every queue's declared fan-out must have all sends acknowledged before
-delivery telemetry is sufficient. Queue sequences must increase, and every send in a queue must start
-before its first completion. Multiple acknowledged recipients are legitimate. Missing completions,
-foreign aliases, rotation gaps and invalid telemetry never establish success by time proximity.
-Retry authority remains narrower: only the existing single-send explicit retryable failure permits
-re-arm; a partially acknowledged fan-out never does. Request identities remain volatile.
-Subscription replay provenance is a required boolean on queue/send events; omission cannot mean a fresh
-send. Subscription replays cannot authorize a fresh-ask retry. Radio
-restoration closes the original window before reopening the WebAPK; post-restoration observation
-uses a new window. Re-arm requires both phone clear and outbound clear acknowledgement.
-A late post cannot satisfy a fresh ask: the existing worker must attest its exact request and the
-authoritative snapshot must retain its generation.
-Deadline expiry installs late-post sampling before returning a typed unexplained timeout; readiness
-also samples restoration and retains any late delivery in its failure observations. Ask-metadata
-waits install their sampler before waiting; only exhaustion of the metadata window is
-`delivery_metadata_timeout`. Snapshot errors retain their original identity, and an expired execution
-budget is `delivery_timeout`. Readiness starts its failure clock before mutation; even an error
-normalizing failure evidence cannot skip restoration. Containment errors take precedence over an
-expired delivery budget, including request attestation after a recovered delivery.
-Late samplers remain armed through the old ask's clear settlement, are replaced for a fresh ask,
-and are disarmed immediately on in-budget delivery or an ambiguous overlap retry.
-Late-sampler failure is retained without skipping device restoration. Execution deadlines are
-rechecked after asynchronous observations and before success, including readiness telemetry,
-ownership and clear verification. Every persisted duration/count is a bounded safe integer;
-monotonic durations are rounded before persistence. Readiness retains separate 160-second delivery
-and clear windows. Ordinary, re-arm, overlap and Doze clear budgets start before their answer and
-metadata work; entering the final phone observation never grants a new window.
-Unacknowledged target creation remains unresolved after its bounded response route expires.
-Target/forward cleanup failure blocks Pixel release with a harness root and causally linked
-containment collateral, including failures inside network fallback and diagnostic paths; final task
-restoration uses ADB without reopening CDP. Notification cleanup inspects both v1 and source-scoped
-v2 Hold/Hide stores and does not treat malformed records as evidence of absence.
-At most one evidence-backed fresh ask is allowed per phase, separate from overlap recovery; all
-privacy assertions and the 60/160-second bounds remain unchanged. The forbidden-sink proof requires
-both raw-stream discard and validated structured-log safety.
-Per-phase `deliveryTimings` retains ordered first/second millisecond pairs for each delivery,
-without overwriting earlier observations; the phase-wide one-re-arm budget remains independent.
-
-Logs live outside fixture-cleanup directories. Reads bracket event files with health reads and retry
-any changed or pending health/lease state; a torn snapshot never becomes evidence. After the daemon stops,
-collection holds the exclusive claim while validating bounded records into private, exclusively-created immutable job files and
-lane/phase slices, fsyncs the files and their directory, and rechecks the retained health state before
-atomically retiring the remote directory. Only the retired directory is unlinked; startup refuses
-claimed/retired destinations. Failed validation or retention leaves remote evidence and its claim
-intact; a deletion failure leaves the remaining evidence in the retired directory.
-No raw errors, endpoints, real identifiers or identifier hashes, notification text, payloads, capabilities,
-tokens, or provider bodies are retained in these artifacts.
-
-Forbidden:
+Never attach string-valued identifiers, hashes, paths, error messages, metadata, or serialized query objects. Across logs, diagnostics, and support bundles, the following are forbidden:
 
 - capabilities or substrings;
-- request/response bodies for launch endpoints;
+- request or response bodies for launch endpoints;
 - authorization or identity headers;
-- per-host query tokens or the readiness token;
+- per-host discovery tokens or the readiness token;
 - transcript, prompt, tool, or subagent content;
 - full filesystem paths by default;
 - browser network traces containing secret responses;
 - screenshots while a canary capability is visible;
 - unredacted tailnet names and identities in public bundles.
 
-Creation adds no logging exception: request payloads, operation/owner identifiers, labels,
-executable and working-copy paths, argv/env, raw Tern stdout/stderr or inspection output, and
-`omp_session_file` never enter logs or public errors. Diagnostics exclude the creation ledger,
-creation request payloads, argv/env, and raw CLI/inspection output; never add the ledger to a
-support archive. Snapshot progress publishes counters only, not transcript content.
+Creation adds no logging exception: request payloads, operation and owner identifiers, labels, executable and working-copy paths, `argv` and `env`, raw Tern stdout/stderr or inspection output, and `omp_session_file` never enter logs or public errors.
 
-Test infrastructure must fail when a known canary appears in logs, files, Playwright traces, HARs, screenshots, video, browser history, DOM snapshots, caches, storage, service-worker state, or diagnostics archives.
-Tern, multi-host fleet, and speech test fixtures or qualification notes follow the same leak rules: never record a literal 43-character base64url token, a 64-hex discovery token, a collaboration capability, a real `*.ts.net` tailnet hostname (use `<name>.example.ts.net`), a public IPv4 address, or a `/Users/<name>` path.
+`omp-gateway doctor --bundle` archives exclude the creation ledger, fleet grant and coordinator state files, creation request payloads, `argv` and `env`, and raw CLI or inspection output; never add those files to a support archive, and keep client snapshot-loading progress limited to `received` and `total` counters rather than transcript content.
 
-### Percy visual upload boundary and Live
-
-Percy is a test-only third-party sink for authored synthetic DOM and first-party build resources,
-never a production gateway or real OMP session. Synthetic View/Control canaries still count as
-forbidden material. `DashboardFixture.assertNoCapabilityMaterial` closes over full capabilities,
-room ID and encoded key, every contiguous 16-character segment, and URL/JSON/HTML-escaped forms;
-none is exposed as a fixture property. The installed `@percy/dom` serializer runs with the SDK's
-same options. Its full HTML (including hidden attributes, current form values, inline styles and
-text) and every resource, including decoded bytes, must pass that guard plus the capability and
-identifier scanners. The SDK's exact last-mile POST is checked again. A finding fails; it is not
-redacted away. Errors, reporter output and SDK diagnostics never repeat the input or match.
-
-Discovery is restricted to the loopback fixture host, uses Playwright's installed Chromium, and
-keeps JavaScript rendering disabled. Source requests cannot leave the fixture origin; unreviewed
-embedded/executable and resource surfaces fail. There is no live relay or production gateway
-connection. Local mode starts no Percy and strips all Percy credentials. Eligible upload mode
-requires a healthy Percy server, exactly 21 submissions and successful build finalization.
-Forks and every gateway-ci dispatch receive no token and explicitly report not uploaded.
-No traces, screenshots, videos, raw diagnostics or Percy output enter CI artifacts. Local CLI
-logs stay in memory, but Percy redacts and uploads its **CLI logs with each build**. Setting
-`PERCY_CLIENT_ERROR_LOGS=false` disables the separate **CI-log** upload only, not CLI logs.
-Vendor redaction is not the capability boundary: structured log metadata is scanned too.
-Before the real upload starts, upload mode runs the identical 21-case suite against a native-Node
-Percy testing host with real asset discovery and no vendor effects. A private local pipe supplies
-one distinctive ephemeral authority to those fixtures; its guard stays in host memory. After all 21
-submissions, the host reads the testing server's logger records, selects non-`ci` entries and
-applies the pinned CLI redactor exactly as `sendBuildLogs` does. The resulting `clilogs` candidate
-must pass that fixture's full/segment/escape guard plus the capability and identifier scanners.
-A planted SDK-log canary must fail the same scan without repeating it. The audit has a five-minute
-deadline, passes no real token, and never calls `sendBuildLogs`; local mode remains Percy-free.
-Only closed-set phase/reason codes and bounded counts may pass through nested process output.
-The CLI runs under native Node (exactly pinned in CI); the Bun worker requires a responsive API
-and active build before a snapshot can be submitted.
-
-Live is restricted to manual, capability-free synthetic fixtures only. Never point it at a
-production gateway or forward a loopback/tailnet service to it. This lane authorizes no Live
-tunnel, real-session access or candidate qualification. See [ADR-035](DECISIONS.md#adr-035--advisory-percy-review-of-capability-free-serialized-fixtures)
-and the [maintainer runbook](BROWSERSTACK.md).
-
-### Real-device cloud qualification
-
-Cloud-device qualification opens View and Control on TestingBot's real devices, so a vendor-operated
-phone briefly holds a live capability. Only isolated qualification sessions on a candidate gateway
-are opened there: the qualification live OMP session and the lane's own fixture, both with a
-synthetic model key and no user data, and both revoked when the run stops them. The boundary:
-
-- TestingBot's tunnel fetches whatever its devices request from the machine it runs on. Run as
-  shipped, it would reach that machine's loopback, where a gateway trusts identity headers, its LAN,
-  and every tailnet service its login may open, including an operator's own production gateway. The
-  lane therefore runs the tunnel with `--noproxy` and serves the tunnel's local proxy itself. That
-  proxy opens CONNECT tunnels only to the candidate origin and the sources the candidate's
-  `connect-src` names, and refuses everything else, plain HTTP included. It relays TLS without
-  decrypting it, so the vendor sees the tailnet hostname and traffic sizes, not content. The lane
-  closes the proxy and stops the tunnel before it releases the Pixel lease, so this path exists only
-  while its devices run.
-- Stock tunnel 4.9 also opens a Selenium relay and a metrics server on every interface, and the relay
-  lends the TestingBot account to any unauthenticated caller that can reach it. The lane asks for
-  port -1 for both, so neither opens, and stops any tunnel that listens anywhere but loopback or
-  fails to start, before going on.
-- Sessions request no video, screenshots, or device logs, and are not public. The lane does not
-  rely on log-disable requests to prevent vendor retention, so page evaluations return only counts,
-  booleans, and fixed names, and a failed evaluation only its error's name. The in-page sink sweep
-  keeps the capability inside the page and returns no digest, length, matched detail, address, or
-  cache or database name. Control residuals, missing-target labels, arbitrary payload keys and raw
-  headers are also excluded: vendor-safe results contain bounded counts, booleans, closed codes,
-  and `LEAK_SINKS` names only. Allocation user agents/client hints are parsed in-page into constrained
-  family, browser, hardware-code and version fields, and attestation precedes any capability open.
-- Evidence text comes only from fixed grammars (a pinned model, a version number, Apple's push
-  service), so neither a device nor TestingBot can write a link or a reflected credential into a
-  receipt.
-- After the sessions end, the lane fetches every test record TestingBot kept for the attempt, and
-  fails if one contains either session's live View or Control link, or any contiguous 16-character
-  window of one, or kept video or screenshots. Interior and delimiter-crossing windows count,
-  not only delimiter-separated parts. This audit also covers partial/failed attempts: every known
-  session is ended first and every retained record is inspected before fixture/tunnel/workspace
-  release. An audit or cleanup error combined with device availability is diagnostic, never a hold.
-  The links and windows exist only in orchestrator memory; only record counts and verdicts persist,
-  never matched text, windows, digests or lengths.
-  Every declared retained surface is scanned as bounded raw bytes as well as canonical JSON:
-  the shared strict parser rejects duplicate object keys at every depth before references are
-  discovered, and JSON escape forms are also covered. Plaintext logs remain raw-only and never
-  supply references; malformed JSON-declared logs fail closed. The test
-  detail, asset inventory, and declared log/HAR/performance references share one raw-byte budget.
-  Signed log reads forward no account authorization, refuse redirects and unreviewed HTTPS
-  origins/buckets, and fail if any declared surface cannot be inspected. A log-disable request
-  and an empty inventory do not prove anything about unobservable vendor-internal retention.
-- The page compares its loaded application asset with the expected archive asset and returns
-  only a boolean, never a page-controlled pathname, in vendor-logged evaluation results.
-- Each target's sessions end before the next allocation. Any cloud release failure, including
-  a restoration checkpoint failure, marks the result `pixelUnrestored` through aggregate errors;
-  the existing Pixel-lease guard refuses queued device work until cleanup recovery.
-- TestingBot credentials are supplied only through child-process environment variables and in-memory
-  request headers, never command-line arguments, receipts, or logs.
-- BrowserStack is a fixed fallback for iPad Safari and Samsung Chrome only, never iPhone. Selection
-  occurs only on a valid empty TestingBot eligible pool, before a primary write; failures cannot
-  trigger vendor switching. Vendor-qualified ownership prevents colliding IDs from deleting or
-  auditing the wrong account's session, and an ambiguous create remains dirty.
-- BrowserStack Local 8.9 uses the pinned Darwin x64 artifact under Rosetta, force-local, exact host
-  inclusion and force-proxy through the same loopback CONNECT proxy. Include/exclude filters cover
-  all ports and do not replace the proxy's exact authority check. Local's listeners must be
-  loopback-only; cleanup closes the proxy first, then stops only processes with the exact pinned
-  executable and unique attempt working directory, including respawned children. Both paths are
-  realpath-resolved; process enumeration never depends on argv or a `BrowserStackLocal` title.
-  Private 0600 PID/birth identities and parent lineage retain ownership of retitled descendants;
-  exact executable/cwd finds orphaned children and birth checks reject reused PIDs. A missing
-  never-created directory is releasable only when a process snapshot proves no matching executable
-  lineage; ambiguous ownership fails closed. Binary/directory preparation precedes tunnel intent.
-- **Explicit argv exception, single-user orchestrator only:** the lane never places the BrowserStack
-  key in argv, URLs, receipts or logs. It creates only a 0600 key config in the attempt's owned 0700
-  directory and supplies `--config-file`. The pinned vendor binary expands the key into its child's
-  argv; same-user processes already can read the 1Password service-account token. This is accepted
-  exposure, not argv secrecy. Prefer a dedicated BrowserStack team-member key (the plan permits
-  unlimited users), and rotate on suspected exposure. Local stdout/stderr are discarded and its
-  readiness log is a private FIFO, not an evidence file. Stop and crash recovery remove both files.
-- BrowserStack's mandatory text logs, session JSON and every known log/media surface receive the
-  same bounded raw-plus-canonical and exact-16 audit, including partial failures. Signed artifact
-  references come only from JSON parsed by the shared duplicate-key-rejecting parser. JSON logs
-  use it too; ordinary plaintext logs remain raw-only and never supply references. Signed artifact
-  requests carry no account authorization, refuse redirects and unreviewed origins. No recording
-  setting proves vendor-internal absence. Video disabled plus clean indicators and the observed
-  missing-object S3 403 is accepted as no retained media observed; media returning 200 fails.
-  Media detection rejects nonempty screenshot/video/visual fields, including opaque failed-command
-  screenshot payloads, not just familiar media URLs. Only null, false, empty-string and empty-list
-  markers are treated as disabled; dashboard `video_url` is an audited indicator, never a fetch target.
-  Only an entire JSON string value that is one well-formed absolute HTTP(S) URL is a reference:
-  one case-insensitive `://`, its hostname appearing exactly once, and no comma.
-  Keys are never references; any key or non-reference value containing `://` or a pinned artifact,
-  dashboard or documentation hostname, case-insensitively, fails closed rather than extracting or repairing URLs.
-  Before accepting any retained JSON body, a census independently counts every pinned
-  artifact/dashboard hostname in raw text and strict canonical JSON; each count must equal its accepted reference occurrences,
-  including duplicates, or fail with `unaccounted BrowserStack artifact reference`.
-  The census also covers canonical text percent-decoded to a fixpoint within four passes (malformed
-  escapes stay literal; excess depth fails closed) and requires one decoded `://` per reference.
-  `browserstack-pins.json` defines disjoint origin sets:
-  reviewed API/S3 artifact-storage origins are fetched, scanned, privately inventoried and
-  absence-verified; dashboard presentations are counted but never fetched/followed.
-  Capability-free BrowserStack probes on 2026-10-20 pin top-level `browser_url`, `public_url`, `logs`
-  and `video_url` to exact record-bound dashboard paths and query grammars (no userinfo, ports or fragments), and accept only
-  `insights.summary.time_breakdown.{browserstack_time,user_time,capabilities_impact}.optimize_url`
-  links under `/docs/` on the separately pinned documentation origin (no query; optional safe fragment), never fetched or included in the artifact census.
-  A dashboard presentation's content is the already-audited session record, whose API deletion proves removal.
-  Any other origin anywhere, or a dashboard-host URL embedded in longer text or in another field,
-  fails closed. Duplicate references retain the same inventory and media-classification checks.
-  A reference received before finalized build identification is an `unbound retained reference`:
-  persist an incident and fail closed, never queue volatile references for later discovery.
-  Clean later metadata still permits deletion and absence checks, but cannot clear that incident;
-  fresh cleanup after a crash also remains blocked until operator incident handling.
-  Any artifact object (origin plus pathname) first declared after the audit, including pre-DELETE reads, atomically
-  checkpoints its inventory and a `post-audit retained reference` incident while deletion/absence
-  verification continues without late auditing; keys use the value media classifier and any
-  case-insensitive `data:` or media-pattern key fails closed.
-  Post-audit schema, census or body-validation failures atomically checkpoint a `post-audit
-  unvalidated record` incident and individually validated pinned-origin whole-value URLs recovered
-  from strict JSON, then continue DELETE and bounded absence checks rather than accepting the
-  body or inferring references from malformed JSON; checkpoint failures themselves still halt.
-  A missing artifact inventory blocks restoration only after record/all-log absence verification,
-  while XML/text artifact errors remain raw-scanned and hostname-censused rather than JSON-parsed
-  unless declared JSON, preserving clean 404 and the reviewed media-403 absence evidence.
-  DELETE acknowledgement, 404 on session JSON and all six log APIs, and absence of **every declared
-  artifact object** are required before removal/restoration, including references returning 404 at
-  the first audit. The observed missing-object S3 403 remains the reviewed media-absence response.
-  Text-log media keys include nonempty objects/arrays and `http(s):`, `data:` or reviewed
-  base64-prefixed strings, and raw `iVBORw0KGgo`, `/9j/`, `R0lGOD` or `UklGR` runs followed by at
-  least 64 base64 characters count as media; re-signed objects retain origin/path identity and the
-  latest private URL without clearing
-  incidents, and installed-shell timeouts and completed incident removals use closed-code,
-  stage-accurate diagnostics rather than page strings.
-  When present, artifact queries require `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`,
-  `X-Amz-Expires`, `X-Amz-SignedHeaders` and `X-Amz-Signature` exactly once with only
-  `response-content-type` optional, every BrowserStack record-audit failure persists an incident
-  without broadening trusted error causes, and conflicting WebDriver session identifiers are
-  unidentified regardless of capabilities shape.
-  Finalized `video_url` must match the session-bound dashboard video presentation before any media
-  exclusion, and text-body media keys accept bare/single/double-quoted names with `:` or `=` only
-  for nonempty containers or quoted/unquoted media-prefixed strings, never quoted placeholders
-  such as `"[REDACTED]"`.
-  Every running/finalized session read is media-classified with no running `video_url` exemption,
-  and bodies not declared image/video receive bounded-byte PNG/JPEG/GIF/WebP/MP4/WebM/plausible-BMP
-  signature checks before decoding and the existing memory-only text scans, while declared media
-  still count as media without reading their bodies.
-  Retained text is audited only as UTF-8: any declared charset other than UTF-8/US-ASCII, a repeated
-  charset parameter, or a NUL in a decoded body (UTF-16/32 text without a byte-order mark) is an
-  unreviewed encoding and an incident.
-  No lingering-clean-text exception remains. Any already-audited artifact that starts serving
-  content is inspected again; exhausted absence waits keep cleanup incomplete and block the Pixel lease.
-  Signed references persist only in private 0600 recovery progress (inside its 0700 directory),
-  until verified absent. They never enter returned evidence, public summaries or logs; do not
-  publish the private receipt. Recovery does not rely on an in-memory inventory or a saved clean
-  flag. It re-audits finalized raw surfaces using the exact whole-link/16-character scan when both
-  recorded session generations still match. If those links cannot be reconstructed, deletion
-  still proceeds for confidentiality, but `unauditedRecordsDeleted` explicitly counts it and the
-  deletion receives no new clean-audit claim. Audit, API deletion and artifact absence are
-  monotonic stages: a post-DELETE 404 never downgrades an earlier audit into an unaudited deletion.
-  Every non-media retained-surface response body is scanned before rejection, both before and
-  after the initial audit, whatever its HTTP status. This includes rejected DELETE acknowledgements,
-  signed-artifact checks, 200s while waiting for 404, and transient 5xx bodies before a GET retry
-  discards them. Raw scanning precedes parsing; declared JSON also receives the strict canonical
-  scan and reference discovery. A capability hit checkpoints an incident before the original
-  status/format rejection or retry proceeds. Image/video bodies remain unread and report retained
-  media instead; plan, catalog and Local-download transport bodies are not retained surfaces.
-  An audit hit or unverifiable required surface is a persisted
-  incident: deletion is attempted, but cleanup remains failed for operator incident handling.
-  Deletion is defense in depth after the audit, not its replacement.
-  Release proceeds through records, tunnels, fixture, then workspace. Unverified records or Local
-  termination retain the fixture/generation and workspace for recovery; fixture-stop failure also
-  preserves the workspace. Closing the proxy and removing the key config still happen on failure.
-- The iPhone turns background alerts off before its session ends. If its attempt fails first, the
-  subscription stays on the candidate gateway until qualification cleanup uninstalls the gateway,
-  and any alerts sent meanwhile carry only session metadata.
+Qualification harness logs, Percy visual review, and device-cloud vendor rules are in [Qualification and test infrastructure](#14-qualification-and-test-infrastructure).
 
 ### Manual `/collab` is outside this boundary
 
-The rules above bind the gateway. Upstream OMP's manual `/collab` command deliberately prints the
-full capability to the terminal, because showing you the link is the entire point of that flow. It
-is not a defect there and this project cannot change it.
+The rules above bind the gateway. Upstream OMP's manual `/collab` command deliberately prints the full capability to the terminal, because showing the user the link is the entire point of that flow; it is not a defect there and this project cannot change it.
 
-The consequence is that anything recording an OMP terminal captures a live, unexpired capability:
-session transcripts, terminal recorders, CI logs of a PTY, and supervised process managers that
-retain stdout. If `/collab` runs inside a recorded or supervised session, stop the session to
-revoke the printed link.
+Anything recording an OMP terminal therefore captures a live, unexpired capability: session transcripts, terminal recorders, CI logs of a PTY, and supervised process managers that retain stdout. If `/collab` runs inside a recorded or supervised session, stop the session to revoke the printed link.
 
-This is the sharpest argument for the gateway's model rather than a gap in it. The gateway never
-renders a capability: the session list is metadata-only, a capability is fetched just-in-time after
-an explicit action, bound to the session's generation, and returned `no-store` to same-origin
-JavaScript that hands it straight to the pinned client. Nothing on that path is printable.
+This contrast motivates the gateway's model: the gateway never renders a capability, serves a metadata-only session list, fetches one generation-bound capability at launch time after an explicit action, and returns it `no-store` to same-origin JavaScript that hands it straight to the pinned client. Nothing on that path is printable.
 
-Operationally: treat any recording of a terminal that ran `/collab` as containing a secret, and
-prefer gateway-mediated access wherever a session is being recorded or supervised.
+Operationally: treat any recording of a terminal that ran `/collab` as containing a secret, and prefer gateway-mediated access wherever a session is recorded or supervised.
 
 ## 12. Supply-chain and updates
+
+Release artifacts and installations enforce these supply-chain invariants:
 
 - minimal reviewed dependencies and committed lockfiles;
 - dependency license and maintenance review;
 - CI builds from tagged source;
 - checksums, SBOM, and provenance for release artifacts;
-- signed tags/artifacts where maintainers can support them;
-- operators verify published checksums/attestations per [Verify a published build](RELEASE.md#verify-a-published-build)
-  before extracting; `omp-gateway install` never downloads and performs no signature check itself;
+- signed tags and artifacts where maintainers can support them;
+- operators verify published checksums and attestations per [Verify a published build](RELEASE.md#verify-a-published-build) before extracting; `omp-gateway install` never downloads and performs no signature check itself;
 - no self-update channel in v1 unless it is signed, rollback-safe, and separately threat-modeled;
 - preserve upstream OMP attribution for vendored or adapted code.
 
@@ -926,20 +314,109 @@ Before release, prove:
 - public and LAN clients cannot reach the service;
 - unauthorized, absent, shared-but-not-allowlisted, and tagged-without-supported-auth identities are denied;
 - remote identity-header spoofing cannot bypass the loopback Serve path;
-- list/SSE/static HTML contain no capability canary;
-- launch responses are no-store and absent from logs/traces/caches;
+- list, SSE, and static HTML responses contain no capability canary;
+- launch responses are `no-store` and absent from logs, traces, and caches;
 - browser URL, history, DOM, clipboard, cookies, Local Storage, IndexedDB, Cache Storage, service-worker state, test artifacts, and diagnostics contain no canary after leaving a session;
 - collaboration-capability canaries never enter attention metadata, persisted push state, push payloads, notifications, or notification routes;
-- persisted push state contains only the private subscription/VAPID/identity/detail contract, never session metadata or content;
-- attention and notification surfaces expose only ADR-019's approved bounded metadata: opaque request identity, count, and detail-selected labels; Private has no body, and Preview falls back to Session because current OMP snapshots supply no preview. Prompt/option/answer/transcript content, full paths, and any field outside that contract remain forbidden;
+- persisted `push-state.json` contains only the private subscription, VAPID, identity, and detail contract, never session metadata or content;
+- attention and notification surfaces expose only [ADR-019](DECISIONS.md#adr-019--complete-the-couch-flow-attention-contract-with-bounded-presentation-metadata)'s approved bounded metadata: opaque request identity, count, and detail-selected labels; Private has no body, Preview falls back to Session because stock OMP snapshots supply no preview, and prompt, option, answer, transcript, and full-path data remain forbidden;
 - stopped, expired, and replaced generations cannot launch;
-- view-only mutation attempts are rejected by the OMP host;
-- unconfigured cross-origin requests and launches fail with `403` before identity checks and without CORS headers; configured `http.trustedDashboardOrigins` admit only the exact-origin routes listed in [Protocol](PROTOCOL.md#cross-origin-access) (sessions, launch, creation options/collection/status, and the three fleet grant routes from configured coordinators) and their authenticated `OPTIONS` preflights (without consuming launch rate-limit tokens) under full Tailscale identity authorization; any future WebAuthn endpoints must enforce the same exact-origin boundary;
-- a fleet grant credential is refused by every route except `GET /api/v1/notification-feed`, the feed refuses browser requests, foreign or revoked or expired grants, and grants whose coordinator, origin trust, or owner was removed, and a remote event never reaches another owner's or an unselecting device's subscription;
-- fleet feeds, fleet pushes, and fleet notification data carry no title, working directory, model, preview, timestamp, endpoint, secret, or capability, and synthetic canaries in those fields are rejected before persistence, logging, routing, or rendering;
-- malformed and oversized IPC/API input stays bounded;
+- view-only (**View**) mutation attempts are rejected by the OMP host;
+- unconfigured fleet notification routes fail with `404`, and every other unconfigured cross-origin `/api/` request (except loopback `GET /api/v1/health`) fails with `403` before identity checks and without CORS headers;
+- configured `http.trustedDashboardOrigins` (at most 8) admit only the exact-origin routes listed in [Cross-origin access](PROTOCOL.md#cross-origin-access) and their authenticated `OPTIONS` preflights (without consuming launch rate-limit tokens) under full Tailscale identity authorization, and any future WebAuthn endpoints must enforce the same exact-origin boundary;
+- a fleet grant credential is refused by every route except `GET /api/v1/notification-feed`, the feed refuses browser requests, foreign, revoked, or expired grants, and grants whose coordinator, origin trust, or owner was removed, and a remote event never reaches another owner's or an unselecting device's subscription;
+- fleet feeds, fleet pushes (`version: 3`), and fleet notification data carry no title, working directory, model, preview, timestamp, endpoint, secret, or capability, and synthetic canaries in those fields are rejected before persistence, logging, routing, or rendering;
+- malformed and oversized IPC and API input stays bounded;
 - gateway restart starts empty and discovery polling repopulates only live hosts;
-- every test record either vendor kept from the stable campaign's cloud devices contains neither
-  session's live View or Control link, and the tunnel can reach nothing but the candidate origin and
-  its `connect-src` sources;
+- every test record kept by the real-device cloud qualification vendors ([Qualification and test infrastructure](#14-qualification-and-test-infrastructure)) contains neither session's live **View** or **Control** link, and the qualification tunnel reaches nothing outside the candidate origin and its `connect-src` sources;
 - release binaries bind loopback only and match published checksums.
+
+## 14. Qualification and test infrastructure
+
+This section covers the repository's test suites, qualification harnesses, visual-review uploads, and real-device cloud runs rather than the shipped gateway runtime. Maintainer procedures are in [Test plan](TEST_PLAN.md), [Release procedure](RELEASE.md), and [BrowserStack visual review](BROWSERSTACK.md).
+
+### Qualification logs and failure evidence
+
+Qualification diagnostics and `--qualification-log-dir` event files live only in access-restricted local directories (0700 parent directory, 0600 files) outside public receipts and CI artifacts, running against synthetic fixtures and canary capabilities with no external vendor credentials.
+
+Structured daemon qualification logs record only closed event names, finite numbers, and booleans, while private CLI stderr and `browser-substep.json` retain redacted developer-authored error chains that operators must inspect and redact before sharing.
+
+- Test infrastructure must fail when a known canary appears in logs, files, Playwright traces, HARs, screenshots, video, browser history, DOM snapshots, caches, storage, service-worker state, or diagnostics archives.
+- Tern, multi-host fleet, and speech test fixtures or qualification notes follow the same leak rules: never record a literal 43-character base64url token, a 64-hex discovery token, a collaboration capability, a real `*.ts.net` tailnet hostname (use `<name>.example.ts.net`), a public IPv4 address, or a `/Users/<name>` path.
+- The stable qualification CLI's private stderr separately retains developer-authored `Error` messages and stacks along `cause` and `AggregateError` edges, and readiness's private `browser-substep.json` retains the failed browser step, error message, CDP method, and elapsed time.
+- Both sinks use the repository's identifier and capability rules to redact private identifiers and withhold capability-bearing lines, never serialize arbitrary error properties, and never enter receipts, gateway logs, or public artifacts.
+- Repeated or cyclic errors and traversal-limit exhaustion are marked explicitly rather than recursed; message and stack ceilings are 4 and 16 KiB respectively, withholding oversized fields without retaining partial secrets or scanning unbounded provider bodies.
+- Redaction and truncation are explicit and the complete serialized diagnostic is capped below 256 KiB; diagnostic-retention failures stay in private causes rather than the sanitized failure graph, and concurrent execution expiry cannot replace a browser failure or discard its cause.
+- Producer-authored `Error` messages are the authorship boundary (identifier and capability scanning is defense in depth, not a general-purpose body classifier): a short capability-free response body copied into an `Error` message is retained in these private sinks and must never enter receipt evidence, gateway structured telemetry, or public artifacts.
+- `AndroidAdbError` in `scripts/android-device.ts` withholds command stdout and stderr at construction before the bounded private diagnostic formatter rather than copying provider output into an `Error` message and relying on redaction afterward.
+- Effectful Pixel readiness reads GCM only after acquiring its lease and checkpointing a restorable device baseline; a proven disconnection authorizes one bounded Wi-Fi off/on cycle, not changes to Tailscale, DNS, exit-node, firewall, battery, or notification policy.
+- The 30-second Wi-Fi reconnect wait does not enlarge delivery budgets, execution cancellation and normal radio restoration remain authoritative, and an exhausted GCM remedy never authorizes an automatic campaign retry.
+- Late observations and any malformed or duplicate connection line cannot establish readiness; receipts contain only `gcmConnected` and `gcmRemedyApplied` booleans, while all GCM exits and subsequent readiness errors retain those facts and the censored private sample.
+- Successful Push hands the GCM sample to its enclosing readiness owner as separate process-local context retained before post-action persistence and deadline checks, without serializing that context into the receipt; the sample allowlists only the client-connected flag and an `OFF` or bounded duration reconnect alarm (`unavailable` on malformed fields), never device IDs, app or message IDs, network names, endpoints, or the rest of `GcmService` output.
+- Qualification explicitly supplies `--qualification-log-dir` (an environment variable alone never enables daemon retention, leaving ordinary installations unchanged); `install`, `rollback`, and `repair` forward the option only to runtimes advertising `structured-v1`, and raw daemon stdout and stderr remain discarded independently.
+- The `--qualification-log-dir` sink accepts only closed event names and fields, finite numbers, and booleans (plus the fixed envelope timestamp, level, and name), retaining four files of at most 256 KiB in an existing absolute current-user-owned 0700 directory with no symlink components and single-link 0600 regular files (unsafe startup fails; rate-limited discovery and authorization events use the same closed vocabulary).
+- Each synchronous burst durably invalidates the existing private health inode before touching log data; its microtask commit flushes the bounded active file and commits the exact event index and first retained index (rotation flushes the file being moved, per-event appends need no per-event fsync, and an interrupted or failed burst never publishes success).
+- Writer startup and final collection acquire the same exclusive private in-directory claim inside the service writable location: the writer makes its claim durable before logging, and a failed close retains it even if a closed-looking lease write reached the cache and every health invalidation fails.
+- Graceful teardown drains admitted HTTP handlers (not only sockets) and every other event producer, then fsyncs final health, closed lease, and directory state; claim unlink is the last fallible close step, restart and collection reject any held claim (requiring explicit reset after abrupt death or unpersisted unlink, never automatic repair), and writes after close increment a bounded in-memory drop count.
+- Restart and collection require contiguous records in oldest-to-newest file order beginning at index 1 unless the committed rotation boundary explains the prefix; missing or truncated retained files and record reordering fail.
+- Logs live outside fixture-cleanup directories, and reads bracket event files with health reads to retry changed or unsettled health/lease state so a torn snapshot never becomes evidence.
+- After the daemon stops, collection holds the exclusive claim while validating bounded records into private, exclusively created immutable job files and lane/phase slices, fsyncs the files and directory, and rechecks retained health before atomically retiring and unlinking only the retired remote directory.
+- Failed validation or deletion preserves the claim or retired evidence, and no raw errors, endpoints, real identifiers or hashes, notification text, payloads, capabilities, tokens, or provider bodies are retained in these artifacts.
+- Push qualification events retain only numeric sequence, opaque request alias, kind flags, subscription counts, durations, and HTTP status; qualification-only aliases are allocated from the next retained-log append index (preventing reuse across daemon restarts in the same job), mapped to exact session/generation/request tuples only in process memory, and exposed as `qualificationPushAlias` on authenticated `GET /api/v1/sessions` only for the exact active ask (ordinary responses omit it).
+- Before any re-arm, the runtime re-fetches the owned fixture snapshot, requires its alias to match queue, send, and failure evidence, and requires both phone clear and matching outbound clear acknowledgement.
+- Immediately before transport, a fresh snapshot must retain the original instance and generation, controllability, no active ask, and matching request/alias state, and the guarded fixture command checks the OMP session ID synchronously (detecting a session switch, though the cross-process check is not atomic across same-session generation rotation).
+- Collector windows use event indices and one exact request alias: queue sequences must increase, every send in a queue must start before its first completion, and every declared fan-out send must be acknowledged (multiple recipients are valid; provider acknowledgement proves acceptance rather than phone presentation, and missing completions, foreign aliases, rotation gaps, or invalid telemetry never establish success by time proximity).
+- Only a single-send explicit retryable failure permits re-arm (at most one evidence-backed fresh ask per phase, separate from overlap recovery; partially acknowledged fan-outs and subscription replays, which carry a required boolean on queue/send events, never authorize a fresh-ask retry, and request identities remain volatile).
+- Radio restoration closes the original window before reopening the WebAPK for post-restoration observation, and a late post cannot satisfy a fresh ask unless the worker attests its exact request and the authoritative snapshot retains its generation.
+- Late-post and ask-metadata samplers install before waiting or returning `delivery_timeout` or `delivery_metadata_timeout` (preserving snapshot error identities), remain armed through clear settlement, are replaced for a fresh ask, disarm immediately on in-budget delivery or ambiguous overlap retry, and retain late deliveries or sampler failures without skipping device restoration.
+- Readiness starts its failure clock before mutation, rechecks execution deadlines after asynchronous observations and before success, rounds monotonic durations into bounded safe integers, retains ordered millisecond pairs in per-phase `deliveryTimings` without overwriting earlier observations, and enforces separate 160-second delivery and clear windows starting before answer and metadata work (60/160-second bounds and both raw-stream discard and structured-log safety proofs remain required).
+- Containment errors take precedence over expired delivery budgets (including post-recovery request attestation); unacknowledged target creation remains unresolved after its response route expires, target or forward cleanup failure blocks Pixel release with causally linked collateral, final task restoration uses ADB without reopening CDP, and notification cleanup inspects both v1 and v2 Hold/Hide stores without treating malformed records as absence.
+
+### Percy visual upload boundary and Live
+
+Percy is a test-only third-party sink receiving authored synthetic DOM, first-party build resources, and redacted CLI logs for 21 synthetic snapshots (seven states across three source viewports) — never a production gateway, live relay, or real OMP session ([ADR-035](DECISIONS.md#adr-035--advisory-percy-review-of-capability-free-serialized-fixtures), [BrowserStack visual review](BROWSERSTACK.md)).
+
+BrowserStack Live (manual interactive browser sessions) is restricted to manual, capability-free synthetic fixtures with no Live tunnel, real-session access, or candidate qualification authority. Local mode starts no Percy and strips Percy credentials; forks and `gateway-ci` dispatches receive no token and report not uploaded, while eligible CI uploads supply the token only to the pinned native-Node CLI after an offline preflight audit.
+
+- Synthetic **View** and **Control** canaries count as forbidden material: `DashboardFixture.assertNoCapabilityMaterial` closes over full capabilities, room ID, encoded key, every contiguous 16-character segment, and URL, JSON, and HTML-escaped forms without exposing any as a fixture property.
+- The installed `@percy/dom` serializer runs with the SDK's exact options; its full HTML (including hidden attributes, form values, inline styles, and text), every resource and its decoded bytes, and the SDK's exact last-mile `POST` must pass that guard plus the capability and identifier scanners (a finding fails closed rather than redacting, and errors, reporter output, and SDK diagnostics never repeat the input or match).
+- Percy asset discovery is restricted to the loopback fixture host in Playwright's installed Chromium with JavaScript rendering disabled, refusing off-origin requests and unreviewed embedded, executable, or resource surfaces; eligible upload mode requires a healthy Percy server under pinned native Node, a responsive API and active build in the Bun worker, exactly 21 submissions, and build finalization, with no traces, screenshots, videos, raw diagnostics, or Percy output entering CI artifacts.
+- Local CLI logs stay in memory, whereas Percy redacts and uploads its CLI logs with each build (`PERCY_CLIENT_ERROR_LOGS=false` disables only the separate CI-log upload, and structured log metadata is scanned rather than trusting vendor redaction).
+- Before real upload starts, upload mode runs the identical 21-case suite with a five-minute deadline, no real token, and no `sendBuildLogs` call against a native-Node Percy testing host supplied one ephemeral synthetic authority over a private local pipe.
+- After all 21 submissions, the host applies the pinned CLI redactor to non-`ci` logger entries as `sendBuildLogs` does, requires the `clilogs` candidate to pass the full/segment/escape guard and both scanners, verifies that a planted SDK-log canary fails without echoing, and emits only closed-set phase/reason codes and bounded counts across nested processes.
+
+### Real-device cloud qualification
+
+Cloud-device qualification opens **View** and **Control** on TestingBot's real devices (with BrowserStack Automate as a fixed empty-pool fallback for iPad Safari and Samsung Chrome only, never iPhone), so a vendor-operated device briefly holds a live capability for only the isolated qualification OMP session and lane fixture on a candidate gateway, both using a synthetic model key and no user data and both revoked at teardown.
+
+A loopback `CONNECT` proxy restricts tunnel traffic to TLS passthrough for the candidate origin and its `connect-src` sources (exposing only those hostnames and ciphertext sizes), and post-session audits inspect every vendor record for capabilities, 16-character capability windows, video, and screenshots.
+
+TestingBot credentials live only in child-process environment variables and in-memory request headers; on the single-user orchestrator, BrowserStack Local reads its key from a transient 0600 file in the owned 0700 attempt directory.
+
+- TestingBot's tunnel runs with `--noproxy` through the lane's own loopback `CONNECT` proxy (opening `CONNECT` tunnels only to the candidate origin and its `connect-src` sources, refusing plain HTTP, loopback, LAN, and other tailnet services, and closing the proxy and tunnel before releasing the Pixel lease).
+- Stock tunnel 4.9 opens an unauthenticated Selenium relay and metrics server on all interfaces by default; the lane passes port `-1` for both and stops any tunnel that listens outside loopback or fails to start before proceeding.
+- Sessions disable video, screenshots, device logs, and public visibility; without relying on log-disable settings, page evaluations return only bounded counts, booleans, closed codes, error names, and `LEAK_SINKS` names (keeping capabilities in-page with no digest, length, matched text, address, cache/DB name, or page-controlled asset pathname), parse user-agent and client-hint attestation in-page before opening any capability, and build receipt strings only from fixed grammars.
+- After sessions end (including partial or failed attempts, ending every known session before releasing fixtures, tunnels, or workspaces), the lane fetches every TestingBot test record, asset inventory, and declared log, HAR, or performance surface under one raw-byte budget.
+- Signed TestingBot log reads forward no account authorization, refuse redirects and unreviewed HTTPS origins/buckets, and fail if any declared surface cannot be inspected (an empty inventory proves nothing about unobservable vendor-internal retention).
+- Every TestingBot surface is scanned as bounded raw bytes and via the duplicate-key-rejecting canonical JSON parser (covering JSON escape forms while plaintext logs stay raw-only and never supply references, and malformed JSON-declared logs fail closed).
+- Any TestingBot record containing either session's live **View** or **Control** link, any contiguous 16-character interior or delimiter-crossing window, or retained video or screenshots fails the audit; links and windows stay in orchestrator memory, only record counts and verdicts persist, and audit/cleanup errors with available devices are diagnostic rather than holds.
+- Each target's sessions end before the next allocation; any cloud release or restoration checkpoint failure marks `pixelUnrestored` through aggregate errors so the Pixel-lease guard blocks queued device work until cleanup recovery, and if an iPhone attempt fails before disabling background alerts, its metadata-only subscription stays on the candidate gateway only until cleanup uninstalls it.
+- BrowserStack selection occurs only on a valid empty TestingBot eligible pool before any primary write (failures never switch vendors), using vendor-qualified session ownership where an ambiguous create remains dirty.
+- BrowserStack Local 8.9 (pinned Darwin x64 artifact under Rosetta, prepared after binary/directory setup and before tunnel intent) runs with force-local, all-port host filters, force-proxy through the loopback `CONNECT` proxy, loopback-only listeners, discarded stdout/stderr, and a private 0600 readiness FIFO.
+- Local cleanup closes the proxy first and stops only processes matching realpath-resolved executable, unique attempt working directory, and private 0600 PID/birth lineage (releasing a never-created directory only when a process snapshot proves no matching executable lineage, and failing closed on ambiguity).
+- Single-user orchestrator `argv` exception: the lane never places the BrowserStack key in its own `argv`, URLs, receipts, or logs, passing `--config-file` to a 0600 key config in the owned 0700 attempt directory (removed on stop and crash recovery); because the pinned vendor binary expands the key into its child's `argv` where same-user processes already can read the 1Password service-account token, prefer a dedicated BrowserStack team-member key and rotate on suspected exposure.
+- BrowserStack's mandatory text logs, session JSON, and all six log and media surfaces undergo the same bounded raw-plus-canonical and exact-16 audit (including partial failures), extracting unauthenticated redirect-free signed references only from whole-value well-formed HTTP(S) URLs in duplicate-key-rejecting JSON.
+- Valid BrowserStack URL references contain one case-insensitive `://`, their hostname once, and no comma; plaintext logs never supply references, and any key or non-reference string containing `://` or a pinned artifact, dashboard, or documentation hostname fails closed.
+- Before accepting any retained BrowserStack JSON body, a hostname census across raw text, strict canonical JSON, and four-pass fixpoint percent-decoded text (literal malformed escapes; excess depth fails closed; one decoded `://` per reference) must equal accepted reference occurrences against `scripts/browserstack-pins.json`, or fail with `unaccounted BrowserStack artifact reference`.
+- Reviewed API and S3 artifact origins (requiring `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`, and `X-Amz-Signature` once each when signed, with only `response-content-type` optional) are fetched, scanned, privately inventoried, and absence-verified, whereas dashboard presentations are counted and never fetched.
+- Capability-free BrowserStack probes on 2026-10-20 pin top-level `browser_url`, `public_url`, `logs` and `video_url` to exact record-bound dashboard paths and query grammars (no userinfo, ports or fragments), and accept only `insights.summary.time_breakdown.{browserstack_time,user_time,capabilities_impact}.optimize_url` links under `/docs/` on the separately pinned documentation origin (no query; optional safe fragment), never fetched or included in the artifact census.
+- A dashboard presentation's content is the audited session record (proven removed by API deletion); any other origin anywhere, or a dashboard-host URL embedded in longer text or another field, fails closed, and duplicate references retain the same inventory and media-classification checks.
+- Every running and finalized BrowserStack session read is media-classified with no running `video_url` exemption: only `null`, `false`, `""`, and `[]` markers count as disabled (accepting clean indicators plus the observed missing-object S3 `403` as media absence, while media `200` fails and finalized `video_url` must match the session-bound dashboard presentation).
+- Media detection rejects nonempty screenshot/video/visual fields (including opaque failed-command payloads, not only familiar media URLs), case-insensitive `data:` or media-pattern keys, and text-body media keys (`:` or `=`, bare or quoted, excluding quoted placeholders such as `"[REDACTED]"`) carrying nonempty containers or `http(s):`, `data:`, or base64-prefixed strings.
+- Raw `iVBORw0KGgo`, `/9j/`, `R0lGOD`, or `UklGR` runs followed by 64+ base64 characters and non-media bodies matching PNG/JPEG/GIF/WebP/MP4/WebM/plausible-BMP byte signatures fail media checks, while declared media count as media without reading their bodies.
+- Retained text is audited only as UTF-8: any charset other than UTF-8/US-ASCII, repeated charset parameter, or NUL byte in a decoded body checkpoints an unreviewed-encoding incident, and any already-audited artifact that starts serving content is inspected again.
+- Every non-media retained-surface response body — including rejected `DELETE` replies, signed-artifact checks, `200`s while awaiting `404`, and transient `5xx` bodies before retry (excluding plan, catalog, and Local-download transport bodies) — is raw-scanned and, when declared JSON, canonically scanned before status or format rejection.
+- Conflicting WebDriver session IDs are treated as unidentified, and unbound pre-build references persist an incident and fail closed without queuing volatile references for later discovery.
+- Artifacts first declared after the audit (origin plus pathname, retaining re-signed URLs in private 0600 recovery progress inside its 0700 directory), post-audit schema/census/validation failures (recovering only validated whole-value pinned URLs from strict JSON while checkpoint failures halt), audit hits, and unverifiable surfaces persist incidents that block fresh cleanup and never clear on `DELETE` or clean later metadata.
+- Crash recovery re-audits finalized raw surfaces when both recorded session generations match or increments `unauditedRecordsDeleted` without claiming a clean audit (audit, `DELETE`, and absence are monotonic stages, so post-`DELETE` `404` never downgrades an earlier audit, and closed-code stage-accurate diagnostics replace page strings).
+- Release requires `DELETE` acknowledgement, `404` on session JSON and all six log APIs, and absence of every declared artifact (including initial `404`s; exhausted waits block the Pixel lease), then releases records, tunnels, fixture, and workspace in order, retaining downstream state on failure while closing the proxy and removing the key config.

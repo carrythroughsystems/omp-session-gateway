@@ -1,28 +1,20 @@
 # Protocol contracts
 
-This document covers the gateway’s HTTP/SSE API and its client side of mainline OMP’s local
-discovery/query contract. Browser API shapes are unchanged by the mainline cutover. Runtime
-validation lives in `packages/protocol`; browser JSON Schemas remain in `schemas/`.
+This specification is for integrators and contributors looking up the wire and HTTP contracts of OMP Session Gateway, the companion to Oh My Pi (OMP). It defines the local OMP discovery files and socket queries, the browser HTTP and Server-Sent Events (SSE) routes, Web Push envelopes, cross-origin admission, and the in-memory collaboration client bootstrap.
 
-The schemas describe canonical emitted list/SSE data, including bounded ask metadata and
-OMP's 8–64 character identities. Runtime parsers may additionally normalize legacy input.
-HTTP/SSE regressions validate real serialized responses with a Draft 2020-12 validator.
+Runtime parsers are in `packages/protocol`, and Draft 2020-12 JSON Schemas for emitted responses are in `schemas/`. Across this document, an OMP host (one running `omp` process) publishes local discovery metadata, and a **View** or **Control** link is a bearer secret, called a capability in the contracts.
 
-The shared `parseJsonFrame` parser rejects duplicate object keys, NUL bytes, invalid UTF-8,
-oversized frames, and JSON objects/arrays nested beyond 64 levels. Display labels reject raw input
-over 2,048 UTF-16 units before NFC normalization and control/bidi stripping, then enforce 256 code
-points for session labels or 64 for fleet labels.
+The shared `parseJsonFrame` tokenizer (`MAX_FRAME_BYTES`, 64 KiB) rejects empty frames, invalid UTF-8, NUL bytes, duplicate object keys, and JSON objects or arrays nested beyond 64 levels.
+
+Display-label parsers reject raw strings above 2,048 UTF-16 code units before NFC normalization and stripping of ASCII control and Unicode bidirectional characters. Normalized labels allow at most 256 Unicode code points for session labels (`MAX_LABEL_CODEPOINTS`) or 1–64 code points for fleet and session-creation labels (`MAX_FLEET_LABEL_CODEPOINTS`).
 
 ## 1. OMP discovery directory
 
-Require stock OMP `>= 18.1.20`: [PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), merge `4999b98bd5`, ships in [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20).
-OMP publishes under `~/.omp/run/collab-hosts`. `PI_CONFIG_DIR` replaces the `.omp` directory
-**name relative to the home directory**, not the entire discovery path. The gateway may select an
-explicit directory with `omp.discoveryDir`. It only reads this directory: it never creates, writes,
-renames, or unlinks discovery entries or endpoints, including apparently stale ones.
+What files does stock OMP publish on disk, and how does the gateway read them? Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit `4999b98bd5`, [OMP v18.1.20](https://github.com/can1357/oh-my-pi/releases/tag/v18.1.20)) publishes under `~/.omp/run/collab-hosts` (`%USERPROFILE%\.omp\run\collab-hosts` on Windows).
 
-Each live publication has one `<entryId>.json` file, mode `0600`, written once and never rewritten
-for metadata changes. Its required fields are:
+`PI_CONFIG_DIR` replaces the `.omp` directory name relative to the home directory rather than the full path, and `omp.discoveryDir` selects an explicit path.
+
+The gateway only reads this directory and never creates, writes, renames, or unlinks discovery files or socket endpoints, including leftover entries from exited processes. Each publication writes one `<entryId>.json` file (`entryId` matching `^[a-z0-9-]{8,64}$`, POSIX mode `0600`) once at publication time (`schemas/omp-host-registry.schema.json`, `parseOmpDiscoveryEntry`):
 
 ```json
 {
@@ -35,72 +27,53 @@ for metadata changes. Its required fields are:
 }
 ```
 
-The token authorizes queries to this one OMP host. It is private authentication material, **not** a
-View or Control capability and not a gateway installation credential. Discovery files never
-contain collaboration capabilities. Verify private ownership and permissions and reject symlinks
-and malformed entries. Read `endpoint` from the file; do not derive it from `entryId` or PID. OMP
-relocates overlong socket paths to `/tmp/omp-collab-<hash>/<entryId>.sock`.
+- `version` is parsed as any safe integer `>= 1` by `parseOmpDiscoveryEntry` and `schemas/omp-host-registry.schema.json`, while `OmpHostReader` refuses any `version !== 1` alongside RPC requests and replies whose `v` is not `1`.
+- `instanceId` matches `^[a-z0-9-]{8,64}$`, `pid` is an integer in `1`–`2,147,483,647`, and `createdAt` is an integer `>= 0` in epoch milliseconds.
+- `endpoint` is a non-empty string without NUL bytes; callers must read `endpoint` from the JSON file rather than deriving it from `entryId` or `pid` because OMP relocates long socket paths ([Discovery and per-host queries](OMP_INTEGRATION.md#2-discovery-and-per-host-queries)).
+- `token` matches `^[0-9a-f]{64}$` and authorizes queries to this one OMP host only; discovery files never contain **View** or **Control** capabilities or gateway credentials, and symlinks or non-private permissions are rejected.
 
-OMP evolves registry v1 additively, without a version bump. Discovery files, snapshots, `model`,
-and replies may carry fields beyond those documented here: the gateway validates every documented
-field that is present, requires the non-optional ones, ignores the rest, and builds its records
-from named fields only. Any other `version` or `v` is refused.
+OMP evolves registry v1 additively without bumping `version` or `v`: discovery files, snapshots, `model`, and replies may include extra fields, which the gateway ignores while building records from named fields only.
 
-A killed host leaves its file behind until an OMP listing such as `omp collab list` prunes it; the
-gateway never deletes it. Each round the gateway revisits admitted publications, then examines at
-most 4,096 directory names and reads unknown publications newest first, so older leftovers and
-non-publication residue cannot displace a new session. It remembers, by file identity, up to ten
-publications per admission slot whose endpoint proved dead (`ENOENT`/`ECONNREFUSED`) and skips each
-unchanged one without a read or query. A replaced file is read again; a pruned one is forgotten.
+Each poll revisits admitted publications first, scans at most 4,096 directory names, sorts unknown candidates newest-first before reading up to `registry.maxSessions` (default `100`), and caches up to `10 * registry.maxSessions` unchanged dead files (`ENOENT` or `ECONNREFUSED`); see [Mainline OMP discovery reader](ARCHITECTURE.md#11-mainline-omp-discovery-reader) and [Host poller and launch broker](ARCHITECTURE.md#12-host-poller-and-launch-broker).
 
 ## 2. Per-host query transport
 
-The gateway connects to the OMP-owned endpoint as a client. Frames are UTF-8 newline-delimited JSON:
-**one request per connection**, followed by one reply and host-initiated close. There is no gateway
-listener, publisher handshake, persistent stream, or unsolicited metadata frame on this path.
-Terminate the request with a newline; bound request/response bytes using
-`MAX_OMP_REGISTRY_REQUEST_BYTES` and `MAX_OMP_REGISTRY_RESPONSE_BYTES`, validate protocol version
-1 and reply shape, and never echo raw input or transport errors into logs.
+How does the gateway query a published OMP host? The gateway connects as a client to `endpoint` and exchanges UTF-8 newline-delimited JSON: one newline-terminated request per connection, followed by one single-line reply and an OMP-initiated close. There is no gateway IPC listener, publisher registration, persistent socket stream, or unsolicited metadata push.
 
-`omp.queryTimeoutMs` defaults to 1500 ms. Gateway log fields accept only numeric or boolean values,
-never strings, query tokens, endpoints, snapshots, request bodies, or replies.
+Requests are bounded to `MAX_OMP_REGISTRY_REQUEST_BYTES` (4 KiB), responses to `MAX_OMP_REGISTRY_RESPONSE_BYTES` (64 KiB), and connection timeouts to `omp.queryTimeoutMs` (`1500`, 1,500 ms by default).
+
+Every RPC envelope requires `v: 1` (`OMP_REGISTRY_VERSION`). Operational log fields accept only numeric or boolean values, never tokens, endpoints, snapshots, capabilities, or raw transport errors ([Logging, diagnostics, and test artifacts](SECURITY.md#11-logging-diagnostics-and-test-artifacts)).
 
 ### `snapshot`
 
-Request:
+Queries live metadata for one OMP host without requesting a capability (`parseOmpSnapshotReply`).
 
-```json
-{ "v": 1, "token": "<per-host-query-token>", "op": "snapshot" }
-```
+- Request: `{ "v": 1, "token": "<per-host-query-token>", "op": "snapshot" }`
+- Response: `{ ok: true, v: 1, snapshot }`
 
-Success is `{ ok: true, v: 1, snapshot }`. The metadata snapshot contains:
+| Field | Type | Contract |
+|---|---|---|
+| `instanceId` | `string` (`^[a-z0-9-]{8,64}$`) | OMP host identity; never substitute `pid` alone. |
+| `generation` | `integer >= 1` | OMP's session-replacement counter, required on `link` requests. |
+| `pid` | `integer` (`1`–`2,147,483,647`) | OS process ID of the OMP host. |
+| `sessionId` | `string` (`1`–`256` chars) | Active OMP session identifier (no NUL, CR, or LF). |
+| `sessionName` | `string \| null` (optional) | Session title, normalized to `<= 256` code points (`title`). |
+| `cwd` | `string \| null` (optional) | Working directory; reduced to its basename (`cwdLabel`). |
+| `model` | `{ provider, id } \| null` (optional) | Mapped to `<provider>/<id>` (`<= 256` code points). |
+| `startedAt` | `integer` (`0`–`8,640,000,000,000,000`) | Epoch milliseconds; projected to ISO-8601 UTC. |
+| `participants` | `integer >= 0` | Connected collaboration participant count. |
+| `relayConnected` | `boolean` | Relay socket state; `false` never retires local discovery. |
+| `inputRequired` | `boolean` | Attention signal only, with no prompt, options, or answer text. |
+| `busy` | `boolean \| null` (optional) | Optional activity flag on OMP `>= 18.2.9`; `null` or omitted means unknown. |
+| `access` | `"view" \| "control"` | Shared collaboration role; sets `canControl` (`canView` is always `true`). |
 
-| Field | Meaning |
-|---|---|
-| `instanceId` | OMP process identity; never use PID alone as the card identity. |
-| `generation` | Current collaboration generation, required on link requests. |
-| `pid` | Host process ID. |
-| `sessionId` | Active OMP session identity. |
-| `sessionName` | Session display name. |
-| `cwd` | Host working directory; the gateway exposes only its bounded basename by default. |
-| `model` | `{ provider, id }`; mapped to a bounded browser display label. |
-| `startedAt` | Epoch milliseconds; converted to ISO time for browser metadata. |
-| `participants` | Host participant count. |
-| `relayConnected` | Host relay-connection state, not a reason to retire discovery. |
-| `inputRequired` | Boolean attention signal; no prompt, options, answer, or request content. |
-| `busy` | Optional activity boolean from upstream PR #12844; omitted/null is unknown, not idle. Non-boolean values are malformed. |
-| `access` | Shared access, `view` or `control`; determines Control availability. |
-
-No snapshot contains a capability. The gateway derives bounded `SessionMetadata` plus its own
-opaque attention identity; neither full paths nor per-host query tokens enter list/SSE. Boolean
-`busy` projects into optional browser metadata; absent/null is omitted. A retained/unreadable host
-loses only that activity knowledge, without refreshing last-seen time or TTL. An unlisted snapshot
-field is ignored, except that a snapshot naming ask content (`prompt`, `question`, `options`,
-`prefill`, `answer`, `requestId`, or `count`) is refused as a privacy regression.
+- `generation` is OMP's counter that increments when a session is replaced, preventing a stale card from opening a newer session.
+- Neither full filesystem paths nor per-host query tokens enter browser list or SSE responses.
+- Non-boolean, non-null `busy` values are rejected as malformed, and any snapshot containing `prompt`, `question`, `options`, `prefill`, `answer`, `requestId`, or `count` is rejected as a privacy violation.
 
 ### `link`
 
-Only an explicit authorized View/Control launch triggers this request:
+Requests one capability from OMP during an explicit authorized **View** or **Control** launch (`parseOmpLinkReply`).
 
 ```json
 {
@@ -112,66 +85,86 @@ Only an explicit authorized View/Control launch triggers this request:
 }
 ```
 
-`access` is exactly `view` or `control`; `generation` is the value observed by the browser.
-Success is `{ ok: true, v: 1, url }`, where `url` is a bearer capability. No example capability is
-recorded here. The launch broker validates the reply and revalidates current generation, requested
-access, and optional attention request identity before returning the unchanged HTTP launch shape.
-It never stores or caches the capability.
+- Request: `access` is `"view"` or `"control"`, and `generation` is the positive integer observed by the browser.
+- Response: `{ ok: true, v: 1, url }`, where `url` is 16–8,192 UTF-8 bytes (`MAX_CAPABILITY_BYTES`, 8 KiB) without NUL bytes and is wrapped in `SecretCapability` before returning.
+- Revalidation: the launch broker revalidates `generation`, requested access, and any attention `requestId` against `SessionRegistry` both before and after the socket query, and never stores or caches `url`.
 
 ### Wire errors
 
-All error replies have the shape `{ ok: false, v: 1, error }`. The complete error-code set is:
+Failed OMP host queries return `{ ok: false, v: 1, error }` with one of eight OMP wire error codes:
 
 | `error` | Meaning |
 |---|---|
-| `malformed_request` | The request cannot be accepted as a valid query. |
-| `unsupported_protocol` | The request protocol version is unsupported. |
-| `authentication_failed` | The per-host query token is not accepted. |
-| `snapshot_unavailable` | The host cannot currently supply its snapshot. |
-| `invalid_operation` | The operation is not `snapshot` or `link`. |
-| `invalid_access` | The link access value is invalid. |
-| `stale_generation` | The requested collaboration generation is no longer current. |
-| `access_unavailable` | The current host does not share the requested role. |
+| `malformed_request` | Request JSON or framing is invalid. |
+| `unsupported_protocol` | Request `v` is not `1`. |
+| `authentication_failed` | Per-host query `token` was rejected. |
+| `snapshot_unavailable` | Host cannot supply a snapshot on this poll. |
+| `invalid_operation` | `op` is neither `snapshot` nor `link`. |
+| `invalid_access` | `access` is neither `view` nor `control`. |
+| `stale_generation` | Requested `generation` does not match the active session. |
+| `access_unavailable` | Host does not share the requested `access` mode. |
 
-These are OMP wire errors, not gateway HTTP problem codes. None proves that the host has exited.
+OMP wire error codes are distinct from gateway HTTP problem codes, and none proves that the OMP host process has exited.
 
 ## 3. Polling, liveness, and reconciliation
 
-`registry.heartbeatSeconds` now means the discovery poll interval (default 10 seconds). Concurrent
-polls join one round. A successful observation refreshes metadata freshness using daemon receipt
-time from a monotonic clock. `registry.ttlSeconds` defaults to 35 seconds and must exceed twice
-the poll interval.
+When does the gateway retain or remove a session card? `registry.heartbeatSeconds` sets the discovery poll interval (default 10 seconds), and concurrent poll triggers share one in-flight round. Successful `snapshot` replies refresh `lastSeenAt` and observation age on a monotonic daemon clock, while `registry.ttlSeconds` (default 35 seconds) must exceed twice `registry.heartbeatSeconds`.
 
-**Only `ENOENT` or `ECONNREFUSED` from a host query proves that host finished.** A timeout,
-`EMFILE`, `EACCES`, malformed reply, or any wire error (including `snapshot_unavailable`) is
-transient: retain an existing card, without refreshing its successful-observation time, until
-TTL expiry. Do not convert these errors into immediate session removal or discovery-file cleanup.
-Hosts absent from both the observed and retained sets are removed during reconciliation. An
-absent discovery directory is a valid empty directory, not a reason to create it. A normal close
-after a query response is framing, not a host-death signal.
+Only `ENOENT` or `ECONNREFUSED` from an endpoint query proves that an OMP host has exited. Timeouts, `EMFILE`, `EACCES`, malformed replies, and OMP wire errors (including `snapshot_unavailable`) are transient: the registry retains an existing card without refreshing its observation timestamp until `registry.ttlSeconds` expires, clearing only `busy` activity knowledge.
 
-After a daemon restart the memory-only registry begins empty and the next poll discovers live
-hosts. OMP does not reconnect to or authenticate with the gateway.
+Entries absent from both the observed and retained sets are removed during reconciliation, an absent discovery directory is treated as a valid empty directory, and socket close after one reply is normal framing. On daemon startup, the memory-only registry begins empty and repopulates on the first poll ([Host poller and launch broker](ARCHITECTURE.md#12-host-poller-and-launch-broker)).
 
 ## 4. Browser HTTP API
 
-Production requests are accepted only through the loopback Tailscale Serve proxy path and require an allowed identity. By default, no CORS is enabled; opt-in cross-origin access is permitted only for exact dashboard origins configured in `http.trustedDashboardOrigins` on the exact route/method pairs specified under [Cross-origin access](#cross-origin-access).
+Which HTTP routes does `omp-gatewayd` serve, and what rules govern every `/api/` request? Production requests (`auth.mode: "tailscale-serve"`) require a loopback peer (`127.0.0.1`, `::1`, or `::ffff:127.0.0.1`) behind TUN-mode Tailscale Serve and a normalized `Tailscale-User-Login` (`1`–`320` NFC lowercase characters) listed in `auth.allowedLogins` ([Tailnet authorization](SECURITY.md#8-tailnet-authorization)).
 
-Every `/api/` response includes at least:
+Second-hop proxy checks reject requests when `X-Forwarded-For` is multi-hop or outside `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, when `Host` or `X-Forwarded-Host` disagrees with `http.publicOrigin`, or when `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`, `CF-Ray`, `X-Forwarded-Server`, or `Tailscale-Funnel-Request` is present. Development mode (`auth.mode: "dev-localhost"`) admits loopback peers matching the configured loopback `http://` origin.
 
-```http
-Cache-Control: no-store, max-age=0
-Pragma: no-cache
-Referrer-Policy: no-referrer
-X-Content-Type-Options: nosniff
-Cross-Origin-Resource-Policy: same-origin
-```
+Common route rules (`apps/gateway/src/http.ts`, `apps/gateway/src/http-policy.ts`, `apps/gateway/src/auth.ts`):
 
-The server's access log must suppress query strings, request/response bodies, authorization headers, identity headers, and launch endpoint response sizes.
+- Unconfigured notification routes first: when `notifications` is unset, `/api/v1/notification-feed`, `/api/v1/notification-grants*`, and `/api/v1/push/fleet/*` return `404 not_found` before any `Origin`, query, auth, or `OPTIONS` check (`/api/v1/notification-feed` and `/api/v1/notification-grants*` also return `404` early whenever `notifications.coordinators` is unset, while on a source-only host `/api/v1/push/fleet/*` runs `Origin`, query, auth, and `OPTIONS` checks before returning `404`).
+- Origin pre-check and query strings: on every remaining `/api/` route except loopback `GET /api/v1/health`, an `Origin` header that equals neither `http.publicOrigin` nor an admitted cross-origin dashboard origin returns `403 forbidden` without CORS headers before identity checks. Every `/api/` route rejects query parameters with `400 bad_request`.
+- Response headers: every `/api/` and `application/problem+json` response carries `Cache-Control: no-store, max-age=0`, `Pragma: no-cache`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, strict `Permissions-Policy`, and the non-document `Content-Security-Policy` ([Browser controls](SECURITY.md#7-browser-controls)).
+- Access logging: server access logs omit query strings, request and response bodies, authorization and identity headers, and launch response sizes.
+- Error shape: errors return `Content-Type: application/problem+json` with `{ code, message }` and fixed non-echoing messages; unhandled exceptions return `500 internal_error`. Server-wide request bodies cap at `MAX_FRAME_BYTES` (64 KiB), and oversized or malformed route bodies return `400 bad_request`.
+- Same-origin mutations: `POST`, `PUT`, and `DELETE` routes require `Origin` equal to `http.publicOrigin` and `Sec-Fetch-Site` absent or `same-origin` (`requestHasValidMutationContext`, `403 forbidden` otherwise), plus exact case-insensitive `Content-Type: application/json` with no parameters (`415 unsupported_media_type` otherwise).
+- Cross-origin mutations: cross-origin `POST` routes require `Origin` in `http.trustedDashboardOrigins` (and in `notifications.coordinators` for grant routes), `Sec-Fetch-Site` absent or in `{same-site, cross-site}`, and exact `Content-Type: application/json` (`requestHasTrustedDashboardContext`, `403 forbidden` otherwise).
+- Rate limiting: `LaunchRateLimiter` enforces 20 requests per 60 seconds per normalized identity in each of four buckets (`launch`, `push`, `creation`, `grant`; map capacity `Math.max(4, identityCapacity * 4)` where `identityCapacity` is `auth.allowedLogins.length` or `1` in `dev-localhost` mode), returning `429 rate_limited` when exceeded.
 
-### `GET /api/v1/client-config`
+| Method | Path | Purpose | Cross-origin |
+|---|---|---|---|
+| `GET` | `/api/v1/client-config` | Bootstrap home source, remote targets, and speech opt-in | No |
+| `GET` | `/api/v1/sessions` | Read metadata-only session list snapshot | Yes |
+| `GET` | `/api/v1/events` | Stream metadata-only directory SSE events | No |
+| `POST` | `/api/v1/sessions/:instanceId/launch` | Broker one capability for **View** or **Control** | Yes |
+| `GET` | `/api/v1/session-creation-options` | Read Tern creation availability, projects, and profiles | Yes |
+| `POST` | `/api/v1/session-creations` | Admit or idempotently replay a Tern creation | Yes |
+| `GET` | `/api/v1/session-creations/:operationId` | Read owner-scoped Tern creation status | Yes |
+| `GET` | `/api/v1/push/config` | Read public VAPID key and eligible recipient count | No |
+| `POST` | `/api/v1/push/subscription` | Register or update caller's Web Push subscription | No |
+| `DELETE` | `/api/v1/push/subscription` | Remove caller's Web Push subscription | No |
+| `POST` | `/api/v1/push/fleet/status` | Read caller's fleet source enrollment and selection | No |
+| `POST` | `/api/v1/push/fleet/grants` | Mint a coordinator grant secret and verifier | No |
+| `POST` | `/api/v1/push/fleet/grants/:grantId/activate` | Verify initial source snapshot and activate grant | No |
+| `POST` | `/api/v1/push/fleet/grants/:grantId/revoke` | Delete a coordinator grant and close its puller | No |
+| `PUT` | `/api/v1/push/fleet/recipient` | Select 1–7 remote alert sources for an endpoint | No |
+| `DELETE` | `/api/v1/push/fleet/recipient` | Clear remote alert sources and return to Push v2 | No |
+| `POST` | `/api/v1/notification-grants` | Store a 30-day grant verifier on a source | Yes (coordinators) |
+| `POST` | `/api/v1/notification-grants/:grantId/renew` | Extend a source grant by 30 days | Yes (coordinators) |
+| `POST` | `/api/v1/notification-grants/:grantId/revoke` | Revoke a source grant | Yes (coordinators) |
+| `GET` | `/api/v1/notification-feed` | Stream machine-authenticated source SSE feed | No (machine only) |
+| `GET` | `/api/v1/health` | Probe loopback readiness and optional HMAC proof | No (loopback only) |
 
-Returns the public client bootstrap configuration (validated by [`schemas/client-config.schema.json`](../schemas/client-config.schema.json) and `parseClientConfigResponse`):
+### Directory and launch
+
+These four routes bootstrap the **OMP Sessions** directory, stream live metadata updates, and broker per-tap **View** and **Control** capabilities.
+
+#### `GET /api/v1/client-config`
+
+Returns the public client bootstrap configuration for multi-host polling and opt-in browser speech recognition (`schemas/client-config.schema.json`, `parseClientConfigResponse`).
+
+- Request: Authenticated same-origin `GET` with no query string.
+- Response (`200 OK`):
 
 ```json
 {
@@ -194,18 +187,16 @@ Returns the public client bootstrap configuration (validated by [`schemas/client
 }
 ```
 
-Requirements and behavior:
+- Projection: `local.id` is `"local"`, `local.origin` equals `http.publicOrigin`, and `local.label` uses `fleet.label`, defaulting to the first DNS label of `http.publicOrigin` or the literal loopback host in `dev-localhost` mode. The payload never includes `auth.allowedLogins`, `http.trustedDashboardOrigins`, paths, tokens, or registry state; browser bootstrap fallback behavior is in [Fleet sources](ARCHITECTURE.md#fleet-sources).
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on any foreign `Origin` or unauthorized identity.
+- Limits: Serialized body bounded to `MAX_CLIENT_CONFIG_BYTES` (32 KiB), with at most 7 `targets` (`MAX_FLEET_TARGETS`, 8 sources total) having unique `id` (`^[a-z][a-z0-9-]{0,31}$`, excluding `"local"`), `label` (`1`–`64` code points), and canonical `origin` (`<= 256` characters).
 
-- authenticated identically to `GET /api/v1/sessions`;
-- same-origin only: if an `Origin` request header is present and does not equal `http.publicOrigin`, the gateway returns `403 Forbidden`;
-- no query string allowed; `Cache-Control: no-store, max-age=0`; never receives CORS headers;
-- built from named fields only (`local = { id: "local", label: fleet.label, origin: http.publicOrigin }` where `fleet.label` defaults to the first DNS label of the `http.publicOrigin` host and loopback dev origins keep the literal host, `targets = fleet.targets`, `speech = { browserRecognition: speech.browserRecognition }`), bounded to `MAX_CLIENT_CONFIG_BYTES` (32 KiB), with at most 7 `targets` (8 sources total);
-- never spreads `GatewayConfig` and never includes `auth.allowedLogins`, `http.trustedDashboardOrigins`, filesystem paths, readiness or discovery tokens, or registry state;
-- older gateways without this endpoint return `404`, which the web app treats as local-only with `speech.browserRecognition = false` and no error banner; a `200` response with an invalid body, unsupported version, or `local.origin !== location.origin` is treated as a fleet bootstrap error (`Fleet configuration unavailable — reload this app`) while the local directory keeps working.
+#### `GET /api/v1/sessions`
 
-### `GET /api/v1/sessions`
+Returns the current metadata-only session directory snapshot (`schemas/session-list.schema.json`, `parseSessionListResponse`).
 
-Returns metadata only:
+- Request: Authenticated same-origin or trusted cross-origin `GET` with no query string.
+- Response (`200 OK`):
 
 ```json
 {
@@ -218,38 +209,224 @@ Returns metadata only:
       "cwdLabel": "checkout-service",
       "model": "provider/model",
       "startedAt": "2026-07-19T16:25:00.000Z",
+      "lastSeenAt": "2026-07-19T16:25:20.000Z",
+      "canView": true,
+      "canControl": true,
       "inputRequired": true,
+      "busy": false,
       "ask": {
         "requestId": "opaque-in-memory-request-id",
         "since": "2026-07-19T16:25:18.000Z"
-      },
-      "lastSeenAt": "2026-07-19T16:25:20.000Z",
-      "canView": true,
-      "canControl": true
+      }
     }
   ]
 }
 ```
 
-It must never contain a capability, room key, write token, relay secret, per-host query token, readiness token, transcript, answer, tool output, or full path by default. `ask.requestId` is opaque routing metadata generated by the gateway, and `ask.since` is daemon receipt time. `ask.preview` and `optionCount` remain absent until an explicit bounded OMP snapshot contract supplies them.
+- Optional `busy` (`boolean`) is included when the OMP host reports boolean activity and omitted when activity is unknown.
+- `ask` is required when `inputRequired` is `true` and forbidden when `false`: `requestId` (`^[A-Za-z0-9_-]{16,128}$`, `<= 128` UTF-8 bytes) is opaque routing metadata minted by the gateway, `since` is daemon receipt ISO-8601 time, and optional `preview` (`<= 256` code points) and `optionCount` (`1`–`128`) are omitted for stock OMP hosts because stock OMP snapshots carry boolean `inputRequired` only.
+- Optional `qualificationPushAlias` (`integer >= 1`, forbidden when `inputRequired` is `false`) is an opaque qualification-log append index for the active `ask`, emitted only when the daemon runs with `--qualification-log-dir`.
+- Responses never contain capabilities, room keys, write tokens, relay secrets, per-host query tokens, readiness tokens, transcripts, answers, tool output, or full filesystem paths.
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on disallowed `Origin` or unauthorized identity.
+- Limits: At most 1,000 sessions (`MAX_SESSIONS`); `revision >= 0`; `startedAt`, `lastSeenAt`, and `ask.since` up to 64 characters; `title`, `cwdLabel`, and `model` up to 256 normalized code points each.
 
-### `GET /api/v1/events`
+#### `GET /api/v1/events`
 
-Server-Sent Events contain only the same metadata types used by the list endpoint.
+Streams metadata-only directory changes over Server-Sent Events (`schemas/sse-event.schema.json`, `parseSessionEvent`).
 
-Event types:
+- Request: Authenticated same-origin `GET` with no query string.
+- Response (`200 OK`): `Content-Type: text/event-stream; charset=utf-8` with `Connection: keep-alive` and `X-Accel-Buffering: no`. Each stream starts with `snapshot` (`{ type: "snapshot", revision, sessions }`), followed by `session_upsert`, `session_remove`, and `keepalive` (`data: {}`) every 5 seconds (`SSE_KEEPALIVE_MS`), which re-verifies the Tailscale Serve tunnel interface and proves HTTP liveness rather than OMP host freshness.
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on any foreign `Origin` or unauthorized identity.
+- Limits: Stream closes when backpressure drops `desiredSize` below `-32` (`highWaterMark: 32`).
 
-- `snapshot`;
-- `session_upsert`;
-- `session_remove`;
-- metadata-free named `keepalive` events every 5 seconds, observable by dashboard JavaScript.
+#### `POST /api/v1/sessions/:instanceId/launch`
 
-A fresh snapshot establishes each connection's state. Keepalives prove transport liveness, not
-session freshness; the latter still requires successful OMP observations.
+Brokers one generation-bound **View** or **Control** capability from the owning OMP host (`schemas/launch-request.schema.json`, `schemas/launch-response.schema.json`, `parseLaunchRequest`, `parseLaunchResponse`).
 
-### `GET /api/v1/push/config`
+- Request: Authenticated same-origin or trusted cross-origin `POST` with no query string, URL-decoded `:instanceId` matching `^[a-z0-9-]{8,64}$` (encoded segment `1`–`384` characters), `Content-Type: application/json`, and body:
 
-Returns the public half of the per-install VAPID key and the eligible gateway-global recipient count:
+```json
+{
+  "mode": "view",
+  "generation": 3
+}
+```
+
+- Request-specific **Control** launches include optional `"requestId": "<opaque-request-id>"` (rejected when `mode` is `"view"`), which the gateway revalidates alongside `generation` as routing correlation rather than authorization.
+- Response (`200 OK`, secret-bearing):
+
+```json
+{
+  "mode": "view",
+  "generation": 3,
+  "capability": "<opaque-omp-collaboration-capability>"
+}
+```
+
+- Consumed once in JavaScript memory; never cached, persisted, logged, traced, retried by a service worker, or written into the DOM.
+- Errors:
+  - `400 bad_request`: query parameters, invalid `:instanceId` within the `1`–`384`-character segment, malformed or oversized JSON body, unknown keys, or `requestId` with `mode: "view"`.
+  - `403 forbidden`: unauthorized identity, invalid `Origin` or `Sec-Fetch-Site`, or cross-origin `POST` without exact `Content-Type: application/json`.
+  - `404 not_found`: unknown, removed, or TTL-expired session (or encoded `:instanceId` longer than 384 characters).
+  - `409 generation_mismatch`: `generation` does not match the current OMP host generation.
+  - `409 request_mismatch`: `requestId` does not match the session's current actionable request.
+  - `409 mode_unavailable`: OMP host does not share the requested `mode`.
+  - `415 unsupported_media_type`: same-origin `POST` without `Content-Type: application/json`.
+  - `429 rate_limited`: per-identity `launch` rate limit exceeded.
+- Limits: Request body bounded to 4 KiB (`4,096` bytes); `capability` is 16–8,192 UTF-8 bytes; rate limited per identity only (`identityKey + "\0launch"`, 20 requests per 60 seconds, with no per-session limiter).
+
+### Session creation
+
+When `tern` is configured on an execution host ([ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption)), these three routes list approved creation choices, admit idempotent creation operations, and report committed operation state before an ordinary **Control** launch.
+
+#### Session creation DTO rules
+
+Every creation payload and nested object enforces `requireExactKeys` and rejects unknown keys, duplicate JSON keys, `null` substitutions, invalid state/field combinations, and byte-bound overflows (`packages/protocol`, `schemas/session-creation-*.schema.json`):
+
+| DTO | Field | Type and constraint | Bound |
+|---|---|---|---|
+| `SessionCreationOptions` | `version`, `revision` | Literal `1`; lowercase UUIDv4 per daemon lifetime | `<= 64` KiB |
+| `SessionCreationOptions` | `available`, `reason?` | `boolean`; `reason` required iff `available === false` | — |
+| `SessionCreationOptions` | `projects`, `profiles` | `[]` when unavailable; else `1`–`16` projects (`1`–`8` copies), `1`–`8` profiles | — |
+| `SessionCreationRequest` | `clientOperationId`, `revision` | Lowercase UUIDv4 per **Create** tap; options `revision` UUIDv4 | `<= 4` KiB |
+| `SessionCreationRequest` | `projectId`, `workingCopyId`, `profileId` | Choice IDs matching `^[a-z][a-z0-9-]{0,31}$` (`"local"` allowed) | — |
+| `SessionCreationReceipt` | `operationId`, `state` | Daemon UUIDv4; `"accepted"` (`202`) or current state (`200`) | `<= 2` KiB |
+| `SessionCreationStatus` | `operationId`, `state`, `updatedAt` | Daemon UUIDv4; `SessionCreationState`; UTC `YYYY-MM-DDTHH:mm:ss.sssZ` | `<= 2` KiB |
+| `SessionCreationStatus` | `session?`, `error?` | `session` iff `"ready"`; `error` iff terminal non-ready state | — |
+
+- `reason` (when `available` is `false`) is `"not_configured"`, `"configuration_unavailable"`, `"tern_unavailable"`, or `"ledger_unavailable"`.
+- Project and profile `id` values are unique within their arrays, working-copy `id` values are unique within each project, and choice `label` values are `1`–`64` normalized code points.
+- `session` (when `state` is `"ready"`) is `{ instanceId, generation }` (`instanceId` matching `^[a-z0-9-]{8,64}$`, `generation` in `1`–`9,007,199,254,740,991`).
+- Public options expose only choice IDs and display labels, never filesystem paths, executables, `argv`, or `env`; receipts, statuses, and problem bodies never echo labels, paths, `argv`, `env`, drafts, raw CLI output, or capabilities.
+
+#### `GET /api/v1/session-creation-options`
+
+Returns Tern creation availability and configured project, working-copy, and profile choices (`schemas/session-creation-options.schema.json`, `parseSessionCreationOptions`).
+
+- Request: Authenticated same-origin or trusted cross-origin `GET` with no query string.
+- Response (`200 OK`):
+
+```json
+{
+  "version": 1,
+  "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
+  "available": true,
+  "projects": [
+    {
+      "id": "website",
+      "label": "Website",
+      "workingCopies": [{ "id": "main", "label": "main" }]
+    }
+  ],
+  "profiles": [{ "id": "omp", "label": "OMP" }]
+}
+```
+
+- Restarting the daemon mints a fresh random `revision` UUIDv4 without exposing a configuration hash.
+- When `available` is `false`, `200 OK` returns `projects: []`, `profiles: []`, and `reason`: `not_configured` (`config.tern` absent), `configuration_unavailable` (`config.tern` is `{}` or path checks failed), `tern_unavailable` (`tern inspect --json` failed or daemon stopping), or `ledger_unavailable` (`<stateDir>/session-creations.json` invalid or unreadable).
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on disallowed `Origin` or unauthorized identity.
+- Limits: Response bounded to 64 KiB (`MAX_SESSION_CREATION_OPTIONS_BYTES`); availability probes coalesce and cache for 5 seconds, reusing cached availability while an active creation holds the single Tern CLI slot.
+
+#### `POST /api/v1/session-creations`
+
+Admits a new Tern session creation operation or replays an unexpired receipt for the same caller (`schemas/session-creation-request.schema.json`, `parseSessionCreationRequest`, `parseSessionCreationReceipt`).
+
+- Request: Authenticated same-origin or trusted cross-origin `POST` with no query string, `Content-Type: application/json`, and body:
+
+```json
+{
+  "clientOperationId": "4e86bd6c-f68a-4d96-8f34-bb7d67cdbe58",
+  "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
+  "projectId": "website",
+  "workingCopyId": "main",
+  "profileId": "omp"
+}
+```
+
+- Idempotent replay (`200 OK`): inside one serialized admission section, an unexpired record matching normalized identity + `clientOperationId` (independent of `Origin`) with an identical payload returns `200 OK` `{ "operationId": "<uuid-v4>", "state": "<current-state>" }` before checking `revision`, availability, busy state, or rate limits.
+- New admission (`202 Accepted`): persists `accepted` to `<stateDir>/session-creations.json` before returning `202 { "operationId": "<uuid-v4>", "state": "accepted" }`. Browser disconnect, request abort, or closing the tray never cancels an accepted operation, and no cancel or `DELETE` route exists.
+- Errors: `400 bad_request` (query string, invalid/oversized JSON, or unknown choice ID); `403 forbidden` (unauthorized identity, invalid mutation context, or cross-origin `Content-Type`); `409 operation_conflict` (replayed `clientOperationId` with any changed field); `409 revision_mismatch` (stale `revision`); `415 unsupported_media_type`; `429 creation_busy` (another operation is nonterminal); `429 rate_limited`; `503 tern_unavailable`, `503 creation_capacity`, or `503 ledger_unavailable`.
+- Limits: Request bounded to 4 KiB (`MAX_SESSION_CREATION_REQUEST_BYTES`), receipt to 2 KiB (`MAX_SESSION_CREATION_STATUS_BYTES`), at most 1 nonterminal operation globally, at most 64 unexpired ledger records, and 20 new admissions per 60 seconds per identity (`identityKey + "\0creation"`).
+
+#### `GET /api/v1/session-creations/:operationId`
+
+Returns committed owner-scoped status for one creation operation without invoking Tern (`schemas/session-creation-status.schema.json`, `parseSessionCreationStatus`).
+
+- Request: Authenticated same-origin or trusted cross-origin `GET` with no query string and `:operationId` matching lowercase UUIDv4 (`SESSION_CREATION_UUID_PATTERN`).
+- Response (`200 OK`):
+
+```json
+{
+  "operationId": "703e065e-793f-41ab-9ead-00ff6bdcfd72",
+  "state": "ready",
+  "updatedAt": "2026-10-24T23:59:00.000Z",
+  "session": { "instanceId": "example-instance", "generation": 1 }
+}
+```
+
+| `state` | Required state-specific field | Forbidden fields |
+|---|---|---|
+| `accepted`, `launching`, `awaiting_omp` | None | `session`, `error` |
+| `ready` | `session: { instanceId, generation }` | `error` |
+| `failed` | `error: "preflight_failed" \| "spawn_failed" \| "interrupted"` | `session` |
+| `started_unavailable` | `error: "adoption_timeout" \| "correlation_ambiguous" \| "control_unavailable" \| "interrupted"` | `session` |
+| `outcome_unknown` | `error: "launch_outcome_unknown" \| "interrupted"` | `session` |
+
+- Ownership binds to the normalized authorized identity rather than `Origin`, so the same identity can read status from another trusted dashboard.
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on disallowed `Origin` or unauthorized identity; `404 not_found` on unknown, expired, non-UUIDv4, or foreign `:operationId`; `503 ledger_unavailable` on unreadable or invalid ledger state.
+- Limits: Response bounded to 2 KiB (`MAX_SESSION_CREATION_STATUS_BYTES`).
+
+#### Session creation state machine
+
+Every state transition is durably written and `fsync`-committed to `<stateDir>/session-creations.json` before becoming visible over HTTP or triggering its external action (`apps/gateway/src/tern-creation.ts`):
+
+| From | To | Trigger or error |
+|---|---|---|
+| none | `accepted` | Valid new request committed before `202` and before preflight or spawn. |
+| `accepted` | `launching` | Path checks, discovery baseline, and `tern inspect` succeed within 10 s; committed before spawn. |
+| `accepted` | `failed` | `preflight_failed` on preflight failure/timeout; `interrupted` on shutdown or startup recovery. |
+| `launching` | `awaiting_omp` | `tern new tab` exits `0` (10 s, 8 KiB) with a new local `block < 2^56`; block ID committed. |
+| `launching` | `failed` | `spawn_failed` when OS process creation fails before a child exists. |
+| `launching` | `outcome_unknown` | `launch_outcome_unknown` on lost/bad stdout, non-zero exit, timeout, or baseline block; `interrupted` on restart. |
+| `awaiting_omp` | `ready` | Unique 1:1 Tern block/pane match and fresh **Control**-authorized OMP binding adopted. |
+| `awaiting_omp` | `started_unavailable` | `correlation_ambiguous`, `control_unavailable` (`view`-only at deadline), `adoption_timeout` (110 s), or `interrupted`. |
+
+- Adoption polls `tern inspect --json` every 1 second (5 s / 1 MiB bound) and post-spawn OMP discovery (`refreshForAdoption`) until one local `block === blocks[].id === panes[].pane` has an `omp_session_file` basename `<sessionId>` token matching a single fresh OMP host (`startedAt` and `createdAt` at or after `tern new tab` spawn time, outside baseline IDs) authorized for `control` ([Opt-in creation and adoption](OMP_INTEGRATION.md#opt-in-creation-and-adoption)).
+- Optional `tern.window` (`""` or `"2"`–`"999"`) adds `--window <KEY>` to every `inspect` and `new tab` subprocess without exposing a wire field or falling back to another window: missing window slots report `tern_unavailable` in options or `failed` (`preflight_failed`) before spawn, and closed windows during adoption end at `started_unavailable` (`adoption_timeout`).
+- Terminal states (`ready`, `failed`, `started_unavailable`, `outcome_unknown`) are immutable, total daemon execution is bounded to 110 seconds on a monotonic clock from acceptance, and `ready` returns `{ instanceId, generation }` so the browser refreshes the source and calls `POST /api/v1/sessions/:instanceId/launch` (`mode: "control"`).
+
+#### Creation retention, errors, and browser watching
+
+- Ledger retention (`<stateDir>/session-creations.json`): version 1, bounded to 64 records and 512 KiB, retained for 24 hours from `createdAt`; expired terminal records are pruned on startup and before new admissions, and unexpired records are never evicted.
+- HTTP problem codes vs terminal `status.error`: terminal operation errors travel inside `200 OK` `SessionCreationStatus` responses; HTTP `application/problem+json` codes cover request, admission, and ledger failures:
+
+| HTTP status | `code` | Routes | Condition |
+|---|---|---|---|
+| `400` | `bad_request` | Options, Creations, Status | Query string, bad/oversized JSON, unknown key, or invalid UUID/choice ID. |
+| `403` | `forbidden` | All creation routes, `OPTIONS` | Disallowed identity, `Origin`, `Sec-Fetch-Site`, or cross-origin `Content-Type`. |
+| `404` | `not_found` | Status `GET` | Unknown, expired, non-UUIDv4 `:operationId`, or another caller's operation. |
+| `409` | `operation_conflict` | Creations `POST` | Replayed `clientOperationId` with a changed field (including `revision`). |
+| `409` | `revision_mismatch` | Creations `POST` | New `clientOperationId` with a stale options `revision`. |
+| `415` | `unsupported_media_type` | Creations `POST` | Same-origin `POST` without `Content-Type: application/json`. |
+| `429` | `rate_limited` | Creations `POST` | Per-identity `creation` rate limit (`20/min`) exceeded. |
+| `429` | `creation_busy` | Creations `POST` | Another creation operation is nonterminal. |
+| `503` | `tern_unavailable` | Creations `POST` | `tern` unconfigured, runtime/inspect failed, or daemon stopping. |
+| `503` | `creation_capacity` | Creations `POST` | Ledger holds 64 unexpired operations. |
+| `503` | `ledger_unavailable` | Creations `POST`, Status `GET` | Ledger validation, read, or atomic write failed. |
+| `500` | `internal_error` | All routes | Unhandled server exception boundary. |
+
+- Browser watching: the browser never retries `POST /api/v1/session-creations` automatically; it polls status serially and holds at most one capability-free paused intent in memory so **Check creation** can inspect status or explicitly replay the identical `clientOperationId` ([OMP Sessions PWA](ARCHITECTURE.md#14-omp-sessions-pwa), [Creating a session in Tern](../apps/web/README.md#creating-a-session-in-tern)).
+
+### Background alerts
+
+These routes configure per-device Web Push subscriptions on the home gateway and define Push v2 (`version: 2`) notification envelopes and tap routes.
+
+#### `GET /api/v1/push/config`
+
+Returns the public half of the installation's VAPID key pair and the gateway-global eligible recipient count (`parsePushConfigResponse`).
+
+- Request: Authenticated same-origin `GET` with no query string.
+- Response (`200 OK`):
 
 ```json
 {
@@ -259,14 +436,15 @@ Returns the public half of the per-install VAPID key and the eligible gateway-gl
 }
 ```
 
-The response is authenticated and no-store. `subscriptionCount` is an integer from 0 through 8,
-counting the currently stored subscriptions whose identity is still eligible for delivery. It is
-gateway-global, not scoped to the querying browser or an OMP session. No endpoints, keys or identities
-are enumerated. The VAPID private key never leaves the gateway's user-only state file and process memory.
+- `applicationServerKey` is 80–128 base64url characters, and `subscriptionCount` (`0`–`8`) counts stored unexpired subscriptions whose owner login remains allowed globally on the gateway without exposing endpoints, keys, or identities. The VAPID private key never leaves `<stateDir>/push-state.json` and daemon memory.
+- Errors: `400 bad_request` on query parameters; `403 forbidden` on foreign `Origin` or unauthorized identity.
+- Limits: `subscriptionCount` is an integer in `0`–`8`.
 
-### `POST /api/v1/push/subscription`
+#### `POST /api/v1/push/subscription`
 
-After an explicit permission action, the browser registers or updates its subscription:
+Registers or updates (`POST`) or removes (`DELETE`) a browser Web Push subscription on `/api/v1/push/subscription` (`parsePushSubscriptionRequest`, `parsePushSubscriptionResponse`, `parsePushUnsubscribeRequest`).
+
+- Request (`POST`): Authenticated same-origin mutation with no query string, `Content-Type: application/json`, and body:
 
 ```json
 {
@@ -283,23 +461,15 @@ After an explicit permission action, the browser registers or updates its subscr
 }
 ```
 
-`detailLevel` is exactly `private`, `session`, or `preview`. New subscriptions explicitly select
-`session`. Re-registering an existing browser subscription may omit `detailLevel`; the gateway then
-preserves that endpoint's stored choice, defaulting only migrated v1 state to `session`. Require
-exact same-origin mutation context, `application/json`, strict keys, HTTPS endpoint without
-credentials or fragment, bounded key/endpoint/body sizes, authenticated identity, rate limits, and
-at most eight stored subscriptions. Persist only the endpoint/keys, identity, detail level, and
-VAPID pair in a private atomic state file. This file is not the session registry and contains no
-session metadata or collaboration capability.
+- `detailLevel` is `"private"`, `"session"`, or `"preview"` (optional on `POST`: new subscriptions explicitly send `"session"`, and omitting `detailLevel` on re-registration preserves the endpoint's stored level). `endpoint` must be a canonical `https://` URL without credentials or fragment; `expirationTime` is `null`, omitted, or a non-negative safe integer; `p256dh` is 80–128 base64url characters and `auth` is 20–64 base64url characters.
+- Request (`DELETE /api/v1/push/subscription`): Same-origin mutation with `Content-Type: application/json` and `{ "version": 2, "endpoint": "..." }`.
+- Response: `POST` returns `200 OK` `{ "version": 2, "detailLevel": "private" | "session" | "preview" }` after persisting to `<stateDir>/push-state.json` (VAPID keys, endpoints, transport keys, owner identity, and detail level only) and queuing active **Control**-capable requests. `DELETE` returns `204 No Content`; browser unsubscribe is authoritative, and push-service `404` or `410` responses evict matching delivery targets.
+- Errors: `400 bad_request` on query parameters, invalid/oversized JSON, or invalid fields; `403 forbidden` on unauthorized identity or invalid same-origin context; `409 subscription_rejected` (`POST` at the 8-subscription cap or on write failure); `415 unsupported_media_type`; `429 rate_limited`.
+- Limits: Request body bounded to 8 KiB (`MAX_PUSH_SUBSCRIPTION_BYTES`), `endpoint` bounded to 4 KiB (`MAX_PUSH_ENDPOINT_BYTES`), at most 8 stored subscriptions (`MAX_PUSH_SUBSCRIPTIONS`), and 20 requests per 60 seconds per identity (`identityKey + "\0push"`).
 
-`DELETE /api/v1/push/subscription` accepts exactly `{ "version": 2, "endpoint": "..." }`. Browser
-unsubscribe is authoritative; a failed delete leaves an unusable endpoint that the gateway removes
-when delivery returns `404` or `410`.
+#### Web Push notification envelopes
 
-### Web Push notification envelopes
-
-The encrypted payload is exactly one of the following attention/clear envelopes, or the strict
-`activity_stop` envelope described below:
+For subscriptions without remote fleet sources selected, the encrypted Web Push payload (`aes128gcm`, `urgency: "high"`, `TTL: 300` seconds, 10-second send timeout, no `Topic` header, VAPID `sub` set to `https://github.com/carrythroughsystems/omp-session-gateway` so Apple push servers accept the JWT) is one of three Push v2 shapes (`parseAttentionPushMessage`):
 
 ```json
 {
@@ -314,6 +484,15 @@ The encrypted payload is exactly one of the following attention/clear envelopes,
 }
 {
   "version": 2,
+  "type": "activity_stop",
+  "instanceId": "metadata-instance-id",
+  "generation": 3,
+  "pendingAskCount": 0,
+  "title": "OMP session activity stopped",
+  "body": "Fix payment retry logic · checkout-service"
+}
+{
+  "version": 2,
   "type": "clear",
   "instanceId": "metadata-instance-id",
   "requestId": "opaque-in-memory-request-id",
@@ -321,385 +500,108 @@ The encrypted payload is exactly one of the following attention/clear envelopes,
 }
 ```
 
-`body` is omitted for `private`; `preview` may append one bounded preview line and otherwise falls
-back to `session`. Presentation fields are built at send time and never persisted in gateway push
-state. Send with high urgency, a five-minute TTL, and no `Topic` header, because FCM throttles
-collapsible messages ([delivery](ATTENTION_SPEC.md#notification-lifecycle)). The
-VAPID `sub` claim is the repository URL, `https://github.com/carrythroughsystems/omp-session-gateway`: a
-contact the push service can reach, which Apple enforces by rejecting the JWT otherwise. The
-service worker uses one notification tag per instance, updates it silently, closes it on `clear`,
-and sets or clears the app badge from `pendingAskCount`.
-
-An `activity_stop` envelope contains exactly `version: 2`, `type: "activity_stop"`, `instanceId`,
-`generation`, `pendingAskCount`, fixed `title: "OMP session activity stopped"`, and optional `body`.
-It has no request ID. Private omits the body; Preview uses Session detail. It shares the existing
-instance tag and five-minute TTL. A displayed valid attention notification wins over a stop;
-a clear closes only matching request data and therefore cannot close a stop. See the exact
-[trigger and precedence contract](ATTENTION_SPEC.md#activity-stop-notifications).
-
-Stop clicks use `/collab/:instanceId?activity=stopped&generation=:generation` and open only View
-for the same current generation/canView after authentication. Gone or changed targets stay on the
-directory. Both routes reject duplicate/mixed/extra parameters and invalid identities/generations,
-then scrub the routing URL before networking. Older v2 workers ignore new stop payloads until
-shell activation; attention/clear and durable push-state schemas remain unchanged.
-
-The click route `/collab/:instanceId?request=:requestId` contains routing metadata only and returns
-the no-store application shell. The app loads current authenticated metadata and performs the
-ordinary Control launch POST only when the exact request identity remains actionable and
-controllable. A capability never enters the push payload, route, notification, service worker, or
-history state.
+- `pendingAskCount` is `0`–`1,000` (`MAX_PUSH_PENDING_COUNT`). Presentation fields are built at send time (`<= 256` code points with Private Use Area glyphs stripped) and never persisted: `body` is omitted at `private`, and `preview` falls back to `session` when `ask.preview` is absent (`activity_stop` has no `requestId` and uses `session` at `preview`).
+- Service-worker notification `data` (`parseNotificationData`) contains `{ version: 2, type: "attention", instanceId, requestId }` or `{ version: 2, type: "activity_stop", instanceId, generation }`.
+- Fallback click routes (`parseNotificationRoute`) are `GET /collab/:instanceId?request=:requestId` (**Control**) and `GET /collab/:instanceId?activity=stopped&generation=:generation` (read-only **View**). Valid routes serve the `no-store` `/` shell and scrub to `/` before networking; duplicate, mixed, extra, fragment-bearing, or malformed parameters are rejected (`400 bad_request`), and capabilities never enter push payloads, notification data, routes, worker messages, or history.
+- Pacing, tag replacement, badge updates, stop triggers, and click revalidation semantics are specified in [Notification lifecycle](ATTENTION_SPEC.md#notification-lifecycle), [Activity-stop notifications](ATTENTION_SPEC.md#activity-stop-notifications), and [Notification tap](ATTENTION_SPEC.md#notification-tap).
 
 ### Fleet notifications
 
-[ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator) makes
-the gateway serving the installed PWA (the *coordinator*) send background alerts for selected
-remote sources. Fleet HTTP bodies carry `version: 1`, fleet pushes carry `version: 3`, and Push v2
-above is unchanged for every subscription that has not opted in. Every body is parsed with exact
-keys and bounded sizes by `packages/protocol`; unknown keys and other versions are rejected.
+For fleet notifications — where the home gateway serving the installed app (the coordinator) sends background Web Push alerts for selected remote hosts, called sources ([ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator)) — HTTP bodies carry `version: 1`, fleet pushes carry `version: 3`, and devices with no remote source selected remain on Push v2. Every object is validated with exact keys and byte bounds in `packages/protocol`.
 
-**Configuration.** A coordinator lists eligible `fleet.targets` ids in `notifications.sources`. A
-source lists `{ "id", "origin" }` peers in `notifications.coordinators`, each origin also present
-in `http.trustedDashboardOrigins`. Both default to empty, which keeps every route below answering
-`404`.
+- Role configuration and `404` gating: `notifications` is optional in `config.json`. Coordinator routes (`/api/v1/push/fleet/*`) are same-origin only and answer `404 not_found` unless `notifications.sources` is configured (before `Origin` and `OPTIONS` checks when `notifications` is absent, and after same-origin auth checks when only `notifications.coordinators` is set). Source grant and feed routes answer `404 not_found` unless `notifications.coordinators` is configured.
 
-**Coordinator routes** (same origin, owner-authenticated; mutations require
-`requestHasValidMutationContext`, `application/json`, rate limits, and a 4 KiB body bound):
+Coordinator routes (same-origin, owner-authenticated, `Content-Type: application/json`, per-identity `push` rate limit of `20/min`; `503 fleet_unavailable` if `<stateDir>/fleet-notifications.json` is unhealthy):
 
-| Route | Request | Response |
-|---|---|---|
-| `POST /api/v1/push/fleet/status` | `{ version: 1, endpoint? }` | `{ version: 1, sources: [{ sourceId, state, selected, grantId?, expiresAt? }] }`, one row per configured notification source; `selected` reports the given endpoint's selection |
-| `POST /api/v1/push/fleet/grants` | `{ version: 1, sourceId }` | `201 { version: 1, grantId, verifier }` |
-| `POST /api/v1/push/fleet/grants/:grantId/activate` | `{ version: 1 }` | `204` once the first feed snapshot verifies the grant; `409 grant_rejected`, `503 source_unreachable`, or `404 unsupported` otherwise |
-| `POST /api/v1/push/fleet/grants/:grantId/revoke` | `{ version: 1 }` | `204` |
-| `PUT /api/v1/push/fleet/recipient` | `{ version: 1, endpoint, sources: [id, …] }` | `{ version: 1, sources, released }` |
-| `DELETE /api/v1/push/fleet/recipient` | `{ version: 1, endpoint }` | `{ version: 1, sources: [], released }`; the subscription returns to Push v2 |
+| Method and path | Request | Response | Body bound |
+|---|---|---|---|
+| `POST /api/v1/push/fleet/status` | `{ version: 1, endpoint? }` | `200 { version: 1, sources }` (`<= 8` KiB) | `8` KiB |
+| `POST /api/v1/push/fleet/grants` | `{ version: 1, sourceId }` | `201 { version: 1, grantId, verifier }` | `4` KiB |
+| `POST /api/v1/push/fleet/grants/:grantId/activate` | `{ version: 1 }` | `204` after initial feed snapshot | `4` KiB |
+| `POST /api/v1/push/fleet/grants/:grantId/revoke` | `{ version: 1 }` | `204` | `4` KiB |
+| `PUT /api/v1/push/fleet/recipient` | `{ version: 1, endpoint, sources }` | `200 { version: 1, sources, released }` | `8` KiB |
+| `DELETE /api/v1/push/fleet/recipient` | `{ version: 1, endpoint }` | `200 { version: 1, sources: [], released }` | `8` KiB |
 
-`state` is `not_enrolled`, `pending`, `current`, `stale`, `unauthorized`, or `unsupported` for the
-calling owner. A row names the owner's `grantId` in every state except `not_enrolled` (where it is
-absent) and `unsupported` (where it is optional), and `current` and `stale` rows also carry the
-`expiresAt` the coordinator persisted from the feed, so any of the owner's devices can renew or
-revoke. `grantId` is a lowercase UUIDv4 and `verifier` the 43-character unpadded base64url
-SHA-256 of `"omp-fleet-grant-v1" ‖ 0x00 ‖ grantId ‖ 0x00 ‖ secret`; the 256-bit secret is generated,
-stored, and used only by the coordinator. A recipient `endpoint` must be an existing subscription of
-the caller, and `sources` names 1–7 distinct remote notification sources, never `local`; the
-coordinator's own sessions always reach a subscribed device. `released` lists `{ sourceId, grantId }`
-for grants that no device of the owner selects any more: the coordinator has discarded their secrets
-and closed their feeds, and the page revokes them at the sources when they are reachable (expiry
-covers the rest).
+- The three coordinator routes carrying a push `endpoint` (`status` and `PUT`/`DELETE` `recipient`) accept up to 8 KiB (`MAX_FLEET_REQUEST_BYTES + MAX_PUSH_ENDPOINT_BYTES`); the three grant routes accept up to 4 KiB (`MAX_FLEET_REQUEST_BYTES`). Invalid JSON or schema mismatches return `400 bad_request`, invalid same-origin context returns `403 forbidden`, wrong media type returns `415 unsupported_media_type`, and rate-limit overflow returns `429 rate_limited`.
+- `status` returns `{ version: 1, sources: [{ sourceId, state, selected, grantId?, expiresAt? }] }` (`409 subscription_required` if `endpoint` is not an active caller subscription), where `state` is `"not_enrolled"`, `"pending"`, `"current"`, `"stale"`, `"unauthorized"`, or `"unsupported"`.
+- `grantId` appears in every `status` row except `"not_enrolled"` (absent) and `"unsupported"` (optional), and `"current"` and `"stale"` include `expiresAt` from the source feed. Coverage is separate from browser notification permission, and a disconnected or uncovered source never produces an **All clear** state ([Fleet notifications in ATTENTION_SPEC](ATTENTION_SPEC.md#fleet-notifications)).
+- `grants` (`POST`) requires a configured `sourceId` (`400 bad_request`), an active caller subscription (`409 subscription_required`), and coordinator capacity (`<= 32` grants, `503 grant_capacity`). `grantId` is a lowercase UUIDv4, `secret` is 256 random bits kept only at the coordinator, and `verifier` is the 43-character unpadded base64url SHA-256 of `"omp-fleet-grant-v1" ‖ 0x00 ‖ grantId ‖ 0x00 ‖ secret`.
+- `activate` waits up to 5 seconds for the source's first feed `snapshot` to verify the grant and returns `204`, or fails with:
+  - `409 grant_rejected`: the grant is unknown or unowned at the coordinator, the caller lacks an active push subscription, the source feed rejected the bearer token (`401`), or the feed `snapshot` had an owner-digest mismatch or expired `expiresAt`;
+  - `503 source_unreachable`: the coordinator could not reach the source feed, hit a stream error, or received no initial `snapshot` within 5 seconds;
+  - `404 unsupported`: the source answered `404` on `GET /api/v1/notification-feed` because fleet source alerts are not configured there.
+- `recipient` (`PUT`/`DELETE`) requires an active caller `endpoint` (`409 subscription_required`) and at most 8 fleet recipients (`503 recipient_capacity`); `PUT` `sources` names `1`–`7` distinct remote `sourceId`s, never `"local"`, and `DELETE` returns the subscription to Push v2.
+- Disabling or deselecting the last device of an owner that selects a source discards that owner's grant secret, closes its feed puller, and reports `{ sourceId, grantId }` in `released` for browser-direct revocation at the source (30-day expiry covers unreachable sources).
 
-**Source routes.** `POST /api/v1/notification-grants` (`{ version: 1, grantId, verifier }` →
-`201 { version: 1, grantId, expiresAt }`), `POST /api/v1/notification-grants/:grantId/renew`
-(`{ version: 1 }` → `200 { version: 1, grantId, expiresAt }`), and
-`POST /api/v1/notification-grants/:grantId/revoke` (`{ version: 1 }` → `204` whether or not the
-grant exists) are the only fleet routes a browser reaches on a source. They are cross-origin from a
-configured coordinator's exact origin (`requestHasTrustedDashboardContext` plus a match in
-`notifications.coordinators`), authenticate the owner from that source's own Serve identity, and act
-only on the caller's grants. A grant expires 30 days after its creation or latest renewal; at most
-16 grants exist per source (`503 grant_capacity` after expired grants are pruned).
+Source grant routes (browser-direct cross-origin `POST` from an origin in both `http.trustedDashboardOrigins` and `notifications.coordinators`, authenticated from the source's own Tailscale Serve `Tailscale-User-Login`, per-identity `grant` rate limit of `20/min`, 4 KiB body bound):
 
-**Feed.** `GET /api/v1/notification-feed` answers only a machine request: it refuses any `Origin`
-or `Sec-Fetch-*` header with `403`, requires the Serve-only loopback topology without second-hop
-evidence, ignores Tailscale identity headers, and accepts only
-`Authorization: Bearer <grantId>.<secret>`. An unknown, expired, revoked, or no-longer-authorized
-grant answers `401` without detail. The response is `text/event-stream`; each `data` line is one
-JSON event bounded to 260,096 bytes (`MAX_SESSIONS × 256 + 4 KiB`) whose `type` matches the SSE event name:
+- `POST /api/v1/notification-grants`: `{ version: 1, grantId, verifier }` -> `201 { version: 1, grantId, expiresAt }`. A source keeps one grant per normalized owner and coordinator origin (replacing any prior grant for that pair and closing its stream), expires grants 30 days after creation or renewal, prunes expired entries before checking the 16-grant cap (`503 grant_capacity`), and returns `409 grant_rejected` if `grantId` belongs to another owner or coordinator.
+- `POST /api/v1/notification-grants/:grantId/renew`: `{ version: 1 }` -> `200 { version: 1, grantId, expiresAt }` (`401 unauthorized` if the grant is missing or belongs to another owner or coordinator).
+- `POST /api/v1/notification-grants/:grantId/revoke`: `{ version: 1 }` -> `204` whether or not the grant exists, answering success only after the change is persisted to `<stateDir>/notification-grants.json`. Corrupt or unwritable source state returns `503 grants_unavailable` on all source routes.
+
+Source machine feed (`GET /api/v1/notification-feed`):
+
+- Request and admission: machine-only `GET` with no query string (`400 bad_request` otherwise) and `Authorization: Bearer <grantId>.<secret>`. It refuses any `Origin` or `Sec-Fetch-*` header with `403 forbidden` and never reads `Tailscale-User-Login`.
+- Feed authorization and limits: requires a loopback peer and measured Tailscale TUN interface without second-hop proxy headers, returning `401 unauthorized` on invalid/expired/revoked credentials, `429 rate_limited` above `20/min` per `grantId`, or `503 grants_unavailable`.
+- Response (`200 OK`, `text/event-stream; charset=utf-8`): emits `: heartbeat` comments every 15 seconds, waits until the source's discovery poller completes a healthy round before sending the initial authoritative `snapshot`, and closes if its 256-event queue overflows. Each `data` line matches `event: <type>` and is bounded to 260,096 bytes (`MAX_SESSIONS × 256 + 4 KiB`, `parseFleetFeedEvent`):
 
 ```json
-{ "version": 1, "type": "snapshot", "owner": "<43-char owner digest>", "expiresAt": "2026-12-07T00:00:00.000Z",
-  "sessions": [{ "instanceId": "metadata-instance-id", "generation": 3, "requestId": "opaque-request-id" }] }
+{ "version": 1, "type": "snapshot", "owner": "<43-char owner digest>", "expiresAt": "2026-12-07T00:00:00.000Z", "sessions": [{ "instanceId": "metadata-instance-id", "generation": 3, "requestId": "opaque-request-id" }] }
 { "version": 1, "type": "upsert", "session": { "instanceId": "metadata-instance-id", "generation": 3 } }
 { "version": 1, "type": "remove", "instanceId": "metadata-instance-id", "generation": 3 }
 { "version": 1, "type": "stop", "instanceId": "metadata-instance-id", "generation": 3 }
 ```
 
-`requestId` appears exactly when the session is Control-capable and waiting. `owner` is the
-base64url SHA-256 of `"omp-fleet-owner-v1" ‖ 0x00 ‖ coordinatorOrigin ‖ 0x00 ‖ login`. The snapshot
-is always first, is sent only after the source's discovery has completed a round (heartbeats only
-until then), and is authoritative for that source; `stop` is live-only. A stream that would exceed
-its 256-event queue is closed, and the coordinator reconnects with backoff.
+- `requestId` is present iff the session is waiting and **Control**-capable, `stop` is live-only, and `owner` is the 43-character base64url SHA-256 of `"omp-fleet-owner-v1" ‖ 0x00 ‖ coordinatorOrigin ‖ 0x00 ‖ login`.
 
-**Fleet push (`version: 3`).** Every message to a fleet recipient is one of:
+Fleet push envelopes (`version: 3`, `parseFleetPushMessage`, under 3 KiB JSON, high urgency, 5-minute TTL, no `Topic`):
 
 ```json
-{ "version": 3, "type": "attention", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222",
-  "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 42 },
-  "badge": { "count": 2, "complete": true }, "title": "OMP session needs attention", "body": "Studio · bb2222" }
-{ "version": 3, "type": "activity_stop", "instanceId": "aaaa1111bbbb2222", "generation": 3,
-  "seq": { "epoch": 7, "n": 43 }, "badge": { "count": 2, "complete": true }, "title": "OMP session activity stopped" }
-{ "version": 3, "type": "clear", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222",
-  "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 44 }, "badge": { "count": 1, "complete": true } }
+{ "version": 3, "type": "attention", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 42 }, "badge": { "count": 2, "complete": true }, "title": "OMP session needs attention", "body": "Studio · bb2222" }
+{ "version": 3, "type": "activity_stop", "instanceId": "aaaa1111bbbb2222", "generation": 3, "seq": { "epoch": 7, "n": 43 }, "badge": { "count": 2, "complete": true }, "title": "OMP session activity stopped" }
+{ "version": 3, "type": "clear", "source": "xeffoL_kxqTcht3AiIR0FT", "instanceId": "aaaa1111bbbb2222", "generation": 3, "requestId": "req_0123456789abcdef", "seq": { "epoch": 7, "n": 44 }, "badge": { "count": 1, "complete": true } }
 ```
 
-`source` is the 22-character binding of a remote source, the prefix of the unpadded base64url
-SHA-256 of `"omp-fleet-binding-v1" ‖ 0x00 ‖ sourceId ‖ 0x00 ‖ origin`, and is absent for the
-coordinator's own sessions. `seq.epoch` is persisted by the coordinator and advances at each start to
-`max(previous + 1, current Unix seconds)`; `seq.n` is one coordinator-wide counter within the epoch,
-so a recipient sees gaps but never a reset. `badge.count` (0–8,000) is the known pending
-Control-capable asks across the recipient's sources; `badge.complete` is false while any selected
-source is not current. `body` is absent at Private; otherwise a remote alert's body is exactly the
-target's configured label, ` · `, and the last six characters of `instanceId` (the coordinator
-checks it against its configuration with `parseFleetPushMessage(payload, remoteLabels)` before
-sending; the worker checks its shape), and a local alert shows `fleet.label` before the existing
-Push v2 Session detail.
-There is no snapshot message: after a restart the coordinator sends exact clears and attentions from
-the outstanding asks it persisted per recipient. Reconstructing the memory-only local registry
-assigns a new request ID to each still-pending local ask (OMP exposes only `inputRequired`).
-The old request is exactly cleared and one new alert replaces it, without concurrent duplicate
-alerts or further re-alerts on reconciliation. Still-pending remote asks keep their identity and
-are not repeated when only the home gateway restarts (ADR-048 amendment, 2026-11-08, #605).
-Payloads stay under 3 KiB and use the same urgency,
-TTL, and absent `Topic` as Push v2.
-
-The page reconciles in the foreground by first asking the worker for its push receipt count, then
-fetching fresh snapshots, then posting
-`{ type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh, pending, counted, complete }`,
-where `fresh` lists `local` or bindings whose `pending` asks are complete, `counted` lists `local` and
-the selected `current` or `stale` bindings the badge counts (every fresh source among them), and
-`complete` is the coverage flag. The worker closes only alerts whose session received no push since
-`asOf`. It keeps one pending ask per source session: a Push v3 attention records it, an exact clear
-removes it, and a fresh source's snapshot replaces it unless an attention recorded it after
-`asOf`. If no push arrived since `asOf`, the worker sets the badge to the number of known asks of
-`counted` sources, so an unreachable source counts what pushes and earlier snapshots taught the
-worker.
-
-Fleet notification data is `{ version: 3, type, source?, instanceId, requestId }` for attention
-and `{ version: 3, type, source?, instanceId, generation }` for a stop. Routes append
-`&source=<binding>` for remote sources; route parsing still rejects repeated, extra, or malformed
-parameters.
-
-### `POST /api/v1/sessions/:instanceId/launch`
-
-Request:
-
-```json
-{
-  "mode": "view",
-  "generation": 3
-}
-```
-
-Request-specific Control launches also include the current opaque `requestId`. The gateway
-revalidates that exact ask as well as the generation before releasing Control; the ID is routing
-metadata, not an authorization credential.
-
-Requirements:
-
-- exact same-origin `Origin` (with `Sec-Fetch-Site: same-origin` when present), or an exact configured origin in `http.trustedDashboardOrigins` under [Cross-origin access](#cross-origin-access) (with `Sec-Fetch-Site` absent or in `{same-site, cross-site}`);
-- `Content-Type: application/json` with no ambiguous encodings;
-- verified and allowed Tailscale identity;
-- current generation match and fresh successful host observation;
-- requested access is still shared by OMP;
-- per-identity and per-session rate limits;
-- no WebAuthn assertion in the current API; an additional Control gate remains the ADR-008 proposal.
-
-Successful response, classified as secret-bearing:
-
-```json
-{
-  "mode": "view",
-  "generation": 3,
-  "capability": "<opaque-omp-collaboration-capability>"
-}
-```
-
-The response is consumed once in memory. It is never cached, logged, traced, retried by a service worker, included in browser error reporting, or inserted into the DOM.
-
-Error behavior:
-
-- generation mismatch: `409 Conflict` with a generic non-secret problem object;
-- missing/expired record: `404 Not Found`;
-- unauthorized identity: `403 Forbidden` without session existence details;
-- requested role no longer shared: `409 Conflict` with `mode_unavailable`;
-- exact attention request no longer current: `409 Conflict` with `request_mismatch`;
-- malformed request: bounded `400` response that does not echo input.
-
-### Session creation DTO rules
-
-[ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption) adds `SessionCreationOptions`, `SessionCreationRequest`, `SessionCreationReceipt`, and `SessionCreationStatus` in `packages/protocol` (`parseSessionCreationOptions`, `parseSessionCreationRequest`, `parseSessionCreationReceipt`, `parseSessionCreationStatus`). Public JSON Schemas are `schemas/session-creation-options.schema.json`, `schemas/session-creation-request.schema.json`, and `schemas/session-creation-status.schema.json`. `client-config` v1, `SessionMetadata`, list/SSE, launch DTOs, and OMP discovery/relay frames are unchanged.
-
-Every object (including nested choices and `ready` bindings) enforces `requireExactKeys` and rejects unknown keys, duplicate JSON keys, `null` substitutions, invalid state/field combinations, and size overflows:
-
-| DTO / Schema | Field | Type / Constraint |
-| --- | --- | --- |
-| `SessionCreationOptions` (`schemas/session-creation-options.schema.json`, $\le 64\text{ KiB}$) | `version` | Literal `1` (`SESSION_CREATION_VERSION`) |
-| | `revision` | Canonical lowercase UUIDv4 (`SESSION_CREATION_UUID_PATTERN`), generated once per daemon lifetime |
-| | `available` | `boolean` |
-| | `reason` | Required iff `available === false` (forbidden when `true`): `"not_configured" \| "tern_unavailable" \| "configuration_unavailable" \| "ledger_unavailable"` |
-| | `projects` | `[]` when `available === false`; otherwise `1`–`16` `{ id, label, workingCopies }` (`1`–`8` `{ id, label }` per project) |
-| | `profiles` | `[]` when `available === false`; otherwise `1`–`8` `{ id, label }` |
-| `SessionCreationRequest` (`schemas/session-creation-request.schema.json`, $\le 4\text{ KiB}$) | `clientOperationId` | Canonical lowercase UUIDv4 generated per explicit **Create** action |
-| | `revision` | Canonical lowercase UUIDv4 matching current options `revision` |
-| | `projectId`, `workingCopyId`, `profileId` | Configured choice IDs matching `^[a-z][a-z0-9-]{0,31}$` (`local` is permitted; project/profile IDs unique in their collections, working-copy IDs unique within a project; choice `label` values normalized to `1`–`64` NFC code points) |
-| `SessionCreationReceipt` (`parseSessionCreationReceipt`, $\le 2\text{ KiB}$) | `operationId` | Canonical lowercase UUIDv4 assigned by the daemon |
-| | `state` | `"accepted"` on `202 Accepted`; current `SessionCreationState` on `200 OK` idempotent replay |
-| `SessionCreationStatus` (`schemas/session-creation-status.schema.json`, $\le 2\text{ KiB}$) | `operationId` | Canonical lowercase UUIDv4 |
-| | `state` | `"accepted" \| "launching" \| "awaiting_omp" \| "ready" \| "started_unavailable" \| "failed" \| "outcome_unknown"` |
-| | `updatedAt` | Canonical UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:mm:ss.sssZ`) |
-| | `session` | Required iff `state === "ready"`: `{ instanceId: "^[a-z0-9-]{8,64}$", generation: 1..9007199254740991 }` |
-| | `error` | Required iff state is `failed`, `started_unavailable`, or `outcome_unknown` (closed `SessionCreationError`) |
-
-Public options expose only choice IDs and display labels — never filesystem paths, executables, `argv`, or `env`. Receipts, status responses, and problem bodies never echo labels, paths, `argv`, `env`, prompt text, raw CLI output, or capabilities.
-
-### `GET /api/v1/session-creation-options`
-
-Authenticated, no query parameters, `Cache-Control: no-store, max-age=0`. Returns `200 OK` with `SessionCreationOptions`:
-
-```json
-{
-  "version": 1,
-  "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
-  "available": true,
-  "projects": [
-    {
-      "id": "alpha-founder",
-      "label": "Alpha Founder",
-      "workingCopies": [{ "id": "main", "label": "main" }]
-    }
-  ],
-  "profiles": [{ "id": "omp", "label": "OMP" }]
-}
-```
-
-- `revision` is an opaque random UUIDv4 generated once per daemon lifetime; restarting the daemon invalidates previously fetched options without exposing a configuration hash.
-- When `available` is `false`, the response still returns `200 OK` with `projects: []`, `profiles: []`, and `reason`:
-  - `not_configured`: `config.tern` is absent.
-  - `configuration_unavailable`: `config.tern` is `{}` or a configured executable/working-copy runtime check failed.
-  - `tern_unavailable`: `tern inspect --json` failed or timed out, or the service is stopping.
-  - `ledger_unavailable`: `<stateDir>/session-creations.json` failed validation or could not be read/written safely.
-- Availability probes are demand-driven, coalesced, and cached for 5 seconds; while an operation owns the single CLI slot, `options` reuses the latest cached availability instead of spawning a second `tern` subprocess. A `404` on an older gateway is treated by the browser as unavailable.
-
-### `POST /api/v1/session-creations`
-
-Authenticated, no query parameters, `Cache-Control: no-store, max-age=0`. Request body (`SessionCreationRequest`, $\le 4\text{ KiB}$):
-
-```json
-{
-  "clientOperationId": "4e86bd6c-f68a-4d96-8f34-bb7d67cdbe58",
-  "revision": "14f3cfa2-c391-4ada-91f0-e486fd5bfccc",
-  "projectId": "alpha-founder",
-  "workingCopyId": "main",
-  "profileId": "omp"
-}
-```
-
-Admission and idempotency rules (executed inside one serialized admission section):
-
-- **Mutation context:** Same-origin requests require `requestHasValidMutationContext`; cross-origin requests from `http.trustedDashboardOrigins` require `requestHasTrustedDashboardContext` with exact `Content-Type: application/json`.
-- **Idempotent replay (`200 OK`):** Keyed by **normalized authorized identity + `clientOperationId`** (independent of `Origin`). If an unexpired record matches both keys and the parsed request payload is identical, the gateway returns `200 OK` with `{ "operationId": "<uuid-v4>", "state": "<current-state>" }` before checking current `revision`, availability, busy state, or rate limits.
-- **Conflict (`409 operation_conflict`):** Same normalized identity + `clientOperationId` with any changed request field (including `revision`).
-- **New admission (`202 Accepted`):** Verified against current `revision` (`409 revision_mismatch` on mismatch), active operation slot (at most one nonterminal operation globally; `429 creation_busy` with no queue), availability (`503 tern_unavailable` or `503 ledger_unavailable`), configured choice IDs (`400 bad_request`), ledger capacity ($\le 64$ unexpired records; `503 creation_capacity`), and the per-identity `creation` rate limiter (`20/min`, tracked-key map capacity `Math.max(4, identityCapacity * 4)` including ADR-048's `grant` key, where `identityCapacity` is `auth.allowedLogins.length` or `1` in `dev-localhost` mode, charged only for genuinely new admissions; `429 rate_limited`). The daemon persists `accepted` before returning `202 { "operationId": "<uuid-v4>", "state": "accepted" }` and scheduling execution.
-- **No remote cancellation:** Browser disconnect, request abort, or closing the tray never cancels an accepted daemon operation; no `DELETE` or cancel route exists.
-
-### `GET /api/v1/session-creations/:operationId`
-
-Authenticated owner-scoped status, no query parameters, `Cache-Control: no-store, max-age=0`. `:operationId` must match `SESSION_CREATION_UUID_PATTERN` (exact lowercase UUIDv4). Returns `200 OK` with `SessionCreationStatus` ($\le 2\text{ KiB}$):
-
-```json
-{
-  "operationId": "703e065e-793f-41ab-9ead-00ff6bdcfd72",
-  "state": "ready",
-  "updatedAt": "2026-10-24T23:59:00.000Z",
-  "session": { "instanceId": "example-instance", "generation": 1 }
-}
-```
-
-| `state` (`SessionCreationState`) | Required state-specific field | Forbidden fields |
-| --- | --- | --- |
-| `accepted`, `launching`, `awaiting_omp` | None | `session`, `error` |
-| `ready` | `session: { instanceId, generation }` | `error` |
-| `failed` | `error: "preflight_failed" \| "spawn_failed" \| "interrupted"` | `session` |
-| `started_unavailable` | `error: "adoption_timeout" \| "correlation_ambiguous" \| "control_unavailable" \| "interrupted"` | `session` |
-| `outcome_unknown` | `error: "launch_outcome_unknown" \| "interrupted"` | `session` |
-
-Unknown, expired, malformed-UUID, and other-identity operations all return `404 not_found`. Ownership is bound to the normalized authorized identity (not `Origin`), so the same identity can inspect its operation from another trusted dashboard. Status `GET` reads committed state only and never invokes Tern.
-
-### Session creation state machine
-
-An administrator may bind this adapter to `tern.window` (`""` or a decimal string `"2"`–`"999"`).
-This is not a protocol field: choices, requests, statuses, and enums remain version 1 and never
-expose the selector. When authored, every availability, baseline, adoption, and doctor inspect
-uses `[executable, "inspect", "--json", "--window", KEY]`, and creation uses
-`[executable, "new", "tab", "--window", KEY, "--json", "--keep-open", "--cwd", path, "--",
-...profile.argv]`. With the field absent, argv is unchanged, with no `--window`.
-Tern `0.9.12` rejects missing slots: availability reports `tern_unavailable`, or a failed
-baseline follows `failed/preflight_failed` before spawn. A nonzero spawn exit remains
-`outcome_unknown`; failed adoption inspections, including a closed window, lead to
-`started_unavailable/adoption_timeout` at the existing deadline. No selector-free retry,
-fallback, or respawn is allowed. Window slots may be reassigned; they are not session identity.
-The table below abbreviates CLI commands without the optional selector.
-
-Every state transition is durably committed to `<stateDir>/session-creations.json` (write → `fsync` → atomic rename → directory `fsync`) before becoming observable in HTTP responses or triggering its dependent external action:
-
-| From → To | Trigger and durable boundary |
-| --- | --- |
-| none → `accepted` | Valid new request admitted; durable intent committed before `202` response and before any preflight/spawn work |
-| `accepted` → `launching` | Runtime validation, fresh OMP discovery round (`refreshForAdoption`), and `tern inspect --json` preflight succeed within 10 s; baseline instance/session/block IDs recorded in memory; `launching` committed **before** `Bun.spawn` |
-| `accepted` → `failed` (`preflight_failed`) | Runtime path check, OMP discovery baseline, or `tern inspect --json` preflight fails or times out |
-| `accepted` → `failed` (`interrupted`) | Daemon shutdown or startup recovery before `launching` was committed; spawning is prohibited afterward |
-| `launching` → `failed` (`spawn_failed`) | OS process creation definitively failed before a child process existed |
-| `launching` → `awaiting_omp` | `tern new tab --json --keep-open --cwd <path> -- <argv…>` exits `0` within 10 s / 8 KiB with one valid local block receipt (`block` $< 2^{56}$ and not in pre-spawn baseline); decimal block ID committed with `awaiting_omp` |
-| `launching` → `outcome_unknown` (`launch_outcome_unknown`) | Child process existed, but stdout was lost, malformed, oversized, non-zero exit, timed out, or matched an existing baseline block ID |
-| `launching` → `outcome_unknown` (`interrupted`) | Daemon shutdown or startup recovery while in `launching` |
-| `awaiting_omp` → `ready` | Serial `tern inspect --json` (1 s interval, 5 s / 1 MiB bound) and post-spawn OMP discovery observation yield an exact 1:1 local `block === blocks[].id === panes[].pane` match, a single fresh OMP binding whose `sessionId` is a complete `[A-Za-z0-9-]+` token of `basename(omp_session_file)` minus `.jsonl` (with `startedAt` and `createdAt` $\ge$ `launching.updatedAt`, excluding baseline instance/session IDs), and `registry.authorizeLaunch(instanceId, generation, "control")` succeeds |
-| `awaiting_omp` → `started_unavailable` (`correlation_ambiguous`) | More than one eligible `(instanceId, generation)` binding matches |
-| `awaiting_omp` → `started_unavailable` (`control_unavailable`) | 110 s total operation deadline reached while the unique matching host is `view`-only |
-| `awaiting_omp` → `started_unavailable` (`adoption_timeout`) | 110 s total operation deadline reached without an adoptable binding (including missing `omp_session_file` or early process exit) |
-| `awaiting_omp` → `started_unavailable` (`interrupted`) | Daemon shutdown or startup recovery after `awaiting_omp` was committed |
-
-All terminal states (`ready`, `failed`, `started_unavailable`, `outcome_unknown`) are immutable. Total daemon execution is bounded to **110 seconds** monotonically from acceptance. `ready` carries only `{ instanceId, generation }`; the browser refreshes the selected source and calls ordinary `POST /api/v1/sessions/:instanceId/launch` (`mode: "control"`) to obtain the capability.
-
-### Creation retention, errors, and browser watching
-
-- **Ledger retention (`<stateDir>/session-creations.json`):** Version 1, at most 64 records, 512 KiB maximum, retained for **24 hours** from acceptance (`createdAt`). Expired terminal records are pruned at startup and before new admissions; unexpired records are never evicted.
-- **Problem responses (`application/problem+json`):** Use `{ code, message }` with fixed messages that never echo IDs, paths, `argv`, `env`, or CLI output. Terminal `status.error` values are returned inside `200 OK` `SessionCreationStatus` payloads, not as HTTP problem codes:
-
-| HTTP status | `code` | Route(s) | Condition |
-| --- | --- | --- | --- |
-| `400 Bad Request` | `bad_request` | Options `GET`, Creations `POST`, Status `GET` | Query parameters on any route; malformed/oversized JSON body, unknown keys, or invalid UUID/choice ID in Creations `POST` |
-| `403 Forbidden` | `forbidden` | All creation routes and `OPTIONS` | Missing/disallowed Tailscale identity, unallowlisted `Origin`, invalid `Sec-Fetch-Site`, or cross-origin `POST` without exact `Content-Type: application/json` |
-| `404 Not Found` | `not_found` | Status `GET` (and unmatched paths) | Unknown, expired, non-UUIDv4 `:operationId` path segment, or another identity's `operationId` |
-| `409 Conflict` | `operation_conflict` | Creations `POST` | Same normalized identity + `clientOperationId` replayed with a different payload (including `revision`) |
-| `409 Conflict` | `revision_mismatch` | Creations `POST` | New `clientOperationId` submitted with a stale options `revision` |
-| `415 Unsupported Media Type` | `unsupported_media_type` | Creations `POST` | Same-origin `POST` without `Content-Type: application/json` |
-| `429 Too Many Requests` | `rate_limited` | Creations `POST` | Per-identity `creation` limiter (`20/min`) exceeded on a new operation |
-| `429 Too Many Requests` | `creation_busy` | Creations `POST` | Another creation operation is currently nonterminal (`accepted`, `launching`, or `awaiting_omp`) |
-| `503 Service Unavailable` | `tern_unavailable` | Creations `POST` | `tern` is unconfigured, runtime/inspect probe failed, or service is stopping |
-| `503 Service Unavailable` | `creation_capacity` | Creations `POST` | Ledger already holds 64 unexpired operations |
-| `503 Service Unavailable` | `ledger_unavailable` | Creations `POST`, Status `GET` | Private ledger could not be validated, read, or durably committed |
-| `500 Internal Server Error` | `internal_error` | All routes | Unexpected unhandled exception boundary |
-
-- **Browser transport and watching (`SessionCreationTransport`, `SessionCreationController`):** Options `GET` timeout 4 s, creations `POST` timeout 10 s, status `GET` timeout 4 s; local requests use same-origin credentials, remote requests use `mode: "cors"`, `credentials: "omit"`, `redirect: "error"`, with no automatic `POST` retries. Status polling runs serially 1 s after each response completes for at most 120 s from the explicit **Create** action. Scope/source change, competing launch/tray, readable `403`, `visibilitychange` to hidden, `freeze`/`pagehide`, or **Close** stops watching while the daemon operation continues. One paused capability-free intent is held in page memory so **Check creation** can `GET` status (or replay the identical `POST` when the acknowledgement was lost) without generating a new UUID.
+- `source` is omitted for coordinator-local sessions and otherwise holds the 22-character base64url prefix of the SHA-256 of `"omp-fleet-binding-v1" ‖ 0x00 ‖ sourceId ‖ 0x00 ‖ origin`.
+- `seq.epoch` persists across coordinator restarts (`max(previous + 1, current Unix seconds)`) with one coordinator-wide `seq.n` counter per epoch; `badge.count` (`0`–`8,000`) counts known waiting **Control**-capable requests across selected sources, and `badge.complete` is `false` whenever any selected source is not `"current"`.
+- `body` is omitted at `private`; otherwise remote alerts format `<configured source label> · <last 6 chars of instanceId>` (checked with `parseFleetPushMessage(payload, remoteLabels)` before sending) and local alerts prefix `fleet.label` before local `session` detail.
+- Fleet notification `data` is `{ version: 3, type, source?, instanceId, requestId }` or `{ version: 3, type, source?, instanceId, generation }`, and fallback tap routes append `&source=<binding>` for remote sources; ordering rules are in [Ordering and restart](ATTENTION_SPEC.md#ordering-and-restart).
+- Worker `postMessage` support and mode (`apps/web/src/service-worker.ts`): `{ type: "omp-notification-support-request", version: 2 | 3 }` over a `MessageChannel` replies `{ type: "omp-notification-support-response", version, received? }` (`received` on `version: 3`), and `{ type: "omp-notification-mode", version: 3, fleet: boolean }` replies `omp-notification-mode-set` or `omp-notification-mode-failed`.
+- Worker `postMessage` reconcile (`parseFleetReconcileMessage`): `{ type: "omp-notification-reconcile", version: 3, asOf: { received }, fresh, pending, counted, complete }` supplies unique `"local"` or 22-character binding arrays (`fresh` a subset of `counted`), `pending` `{ source?, instanceId, generation, requestId }` entries belonging to `fresh` (`<= 8,000`), and boolean `complete`.
 
 ### `GET /api/v1/health`
 
-A local unauthenticated health endpoint returns only generic process readiness. Session counts,
-identities, config, paths, and session health require authenticated diagnostics or local CLI access.
-Readiness includes discovery health, not just HTTP reachability: an absent OMP directory is valid,
-but an unsafe or unreadable directory degrades discovery. No directory path, token, count, or host
-detail appears in this response. The optional HMAC challenge/response uses the gateway’s private
-readiness token and keeps its existing shape; that token is never given to OMP.
+Probes loopback process and discovery-directory readiness, with optional instance-bound HMAC verification for `omp-gateway` lifecycle commands.
 
+- Request: Loopback-only `GET` (`127.0.0.1`, `::1`, or `::ffff:127.0.0.1`) with no query string, no Tailscale identity requirement, and optional `X-OMP-Readiness-Challenge: <43-char base64url>` (`^[A-Za-z0-9_-]{43}$`). Loopback `GET /api/v1/health` is exempt from the foreign-`Origin` `403` pre-check, and never emits CORS headers.
+- Response (`200 OK`): `{ "status": "ready" | "degraded" }` without a challenge, or `{ "status": "ready" | "degraded", "proof": "<43-char base64url HMAC>", "instance"?: "<startup-nonce>" }` when challenged, where `proof` is `HMAC-SHA256(readinessToken, challenge + "\0" + (readinessInstance ?? ""))` and `instance` appears when `--readiness-instance` is non-empty.
+- Readiness scope: `status` is `"ready"` when `omp.discoveryDir` is usable or absent and `"degraded"` when unsafe or unreadable; responses never expose paths, counts, identities, or tokens, and `readiness-token` is never shared with OMP.
+- Errors: `400 bad_request` on query parameters, malformed `X-OMP-Readiness-Challenge`, or challenge sent when `readinessToken` is unset; `403 forbidden` on a non-loopback peer or non-`GET` with foreign `Origin`.
+- Limits: `X-OMP-Readiness-Challenge` must be 43 base64url characters (256 bits).
 
 ### Cross-origin access
 
-When `http.trustedDashboardOrigins` is non-empty (up to 8 canonical origins), the gateway admits browser-direct CORS requests from those exact origins on a strictly bounded surface ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
+When `http.trustedDashboardOrigins` configures 1–8 canonical origins, the gateway admits browser-direct CORS requests from those exact origins on eight route and method pairs ([ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors)):
 
-- **Allowed routes and methods:** only `GET /api/v1/sessions`, `POST /api/v1/sessions/:instanceId/launch`, `GET /api/v1/session-creation-options`, `POST /api/v1/session-creations`, `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4), the fleet grant routes `POST /api/v1/notification-grants`, `POST /api/v1/notification-grants/:grantId/renew`, and `POST /api/v1/notification-grants/:grantId/revoke` (exact lowercase UUIDv4; admitted only from an origin that is also a configured `notifications.coordinators` origin), and `OPTIONS` preflight on those exact paths. `/api/v1/events`, `/api/v1/push/*`, `/api/v1/notification-feed`, `/api/v1/client-config`, `/api/v1/health`, and static assets are never exposed cross-origin.
-- **Origin admission:** the request `Origin` header must be a single canonical origin present in `http.trustedDashboardOrigins`. Missing, `null`, `*`, malformed, or multi-valued `Origin` headers are not admitted. Any foreign non-admitted `Origin` on any `/api/` route except loopback `GET /api/v1/health` is refused with `403` (`forbidden`) and no CORS headers before identity checks.
-- **Normal authorization applies:** admitted cross-origin requests still run the full target-gateway authorization path (loopback peer check, TUN-mode Tailscale Serve verification, second-hop proxy header refusal, `auth.allowedLogins` check, rate limiting, and body-size bounds).
-- **Cross-origin mutation context (`requestHasTrustedDashboardContext`):** cross-origin `POST /api/v1/sessions/:instanceId/launch`, `POST /api/v1/session-creations`, and the three fleet grant `POST` routes require `Origin` in `http.trustedDashboardOrigins` (for the grant routes, also an origin listed in `notifications.coordinators`), `Sec-Fetch-Site` absent or in `{same-site, cross-site}` (`none` and `same-origin` are rejected on the cross-origin path), and `Content-Type` exactly `application/json`. `requestHasValidMutationContext` remains required for local launches, creations, and push subscription and fleet coordinator mutations. An opted-in target trusts those dashboards to create approved processes as well as read metadata and open existing sessions.
-- **Response headers on admitted requests:** responses add `Access-Control-Allow-Origin: <exact matched origin>` and `Vary: Origin`, keep `Cache-Control: no-store, max-age=0`, and never emit `Access-Control-Allow-Credentials` or a wildcard. Problem responses (`400`, `403`, `404`, `409`, `413`, `415`, `429`, `500`, `503`) for an admitted origin on the allowed route/method pairs carry the same `Access-Control-Allow-Origin` and `Vary: Origin` headers so the dashboard can distinguish a readable `403` from a network or CORS failure.
-- **Preflight (`OPTIONS`):** handled only on the allowed route patterns above (the five session and creation patterns and the three fleet grant patterns), authenticated through the normal identity path, without querying OMP, starting Tern, or consuming mutation rate-limit tokens. A valid preflight requires `Origin` in `http.trustedDashboardOrigins` (and, for a fleet grant route, in `notifications.coordinators`) and `Access-Control-Request-Method` matching the route (`GET` for sessions, creation options, and exact creation status; `POST` for launch, the creations collection, and the fleet grant routes). `Access-Control-Request-Headers` may be absent, or exactly `content-type` (case-insensitive) for POST only; GET permits no requested headers. It returns `204 No Content` with:
-  - `Access-Control-Allow-Origin: <exact matched origin>`
-  - `Access-Control-Allow-Methods: GET` (or `POST`)
-  - `Access-Control-Allow-Headers: Content-Type` (`POST` only)
-  - `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`
-  - `Cache-Control: no-store, max-age=0` (and no `Access-Control-Max-Age`)
+1. `GET /api/v1/sessions`
+2. `POST /api/v1/sessions/:instanceId/launch`
+3. `GET /api/v1/session-creation-options`
+4. `POST /api/v1/session-creations`
+5. `GET /api/v1/session-creations/:operationId` (exact lowercase UUIDv4)
+6. `POST /api/v1/notification-grants` (origin must also appear in `notifications.coordinators`)
+7. `POST /api/v1/notification-grants/:grantId/renew` (exact lowercase UUIDv4; origin also in `notifications.coordinators`)
+8. `POST /api/v1/notification-grants/:grantId/revoke` (exact lowercase UUIDv4; origin also in `notifications.coordinators`)
 
-  Any other `OPTIONS` request returns `403 Forbidden` with no CORS headers.
+`/api/v1/client-config`, `/api/v1/events`, `/api/v1/push/*`, `/api/v1/notification-feed`, `/api/v1/health`, and static assets are never exposed cross-origin:
+
+- Origin and authorization checks: `Origin` must be a single canonical origin in `http.trustedDashboardOrigins` (missing, `null`, `*`, malformed, or multi-valued headers are rejected). Admitted requests run full target-gateway authorization (loopback peer, TUN-mode Serve topology, second-hop refusal, `auth.allowedLogins`, rate limits, and body bounds), and cross-origin `POST` routes enforce `requestHasTrustedDashboardContext`.
+- CORS response headers: admitted responses (including `400`, `403`, `404`, `409`, `415`, `429`, `500`, and `503` problem responses on the eight allowed pairs) add `Access-Control-Allow-Origin: <exact matched origin>` and `Vary: Origin`, retain `Cache-Control: no-store, max-age=0`, and never emit `Access-Control-Allow-Credentials` or `*`.
+- Preflight (`OPTIONS`) admission: unconfigured notification routes (`notifications` absent, or grant/feed routes without `notifications.coordinators`) return `404 not_found` first. On the eight admitted route patterns, `OPTIONS` authenticates the caller without querying OMP, invoking Tern, or charging rate limits, and checks `Access-Control-Request-Method` (`GET` or `POST`) and `Access-Control-Request-Headers` (absent, or `content-type` on `POST`).
+- Preflight (`OPTIONS`) response: valid preflights return `204 No Content` with `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods: GET` (or `POST`), `Access-Control-Allow-Headers: Content-Type` (`POST` only), `Vary: Origin, Access-Control-Request-Method, Access-Control-Request-Headers`, and `Cache-Control: no-store, max-age=0` (no `Access-Control-Max-Age`). Any other `/api/` `OPTIONS` request returns `403 forbidden` without CORS headers.
+
 ## 5. In-memory collab client bootstrap
 
-Shipped same-page API, defined in `packages/collab-client/upstream/src/embed.ts`:
+How does **OMP Sessions** mount the embedded collaboration client without exposing the capability? `packages/collab-client/upstream/src/embed.ts` (`embed-contract.ts`) exports the same-document bootstrap:
 
 ```ts
 function startCollabWithCapability(
@@ -710,91 +612,28 @@ function startCollabWithCapability(
 ): () => void;
 ```
 
-The return value disposes the mounted client; the capability is passed directly to the pinned
-component rather than through a navigation or persistent bootstrap object.
-
-Requirements:
-
-- parse with pinned upstream OMP code;
-- derive View/read-only state from the absence of the capability write token; a host welcome may
-  further restrict a full link but omission of its optional `readOnly` field must never upgrade a
-  View link or replay a pending mutating response;
-- do not stringify or attach the bootstrap object to React/Vue devtools-visible global state in production;
-- never assign the capability to `location`, an element attribute, text content, a form field, or persistent state;
-- clear references on disconnect/leave and call `onDispose`;
-- reload returns to the directory rather than reconnecting.
-- publish required `CollabEmbedState.loading: { received: number; total: number } | null`
-  through `onStateChange`, forwarding only existing snapshot counters and using `null` when
-  there is no client or loading completes. No transcript data or snapshot-ingestion change is
-  introduced. The gateway chip shows `Joining session… 43%` before first live and
-  `Reconnecting… 43%` after earlier live; floor and clamp the percentage to 0–100, omit it for
-  invalid/zero totals, retain forbidden/ended/sustained-outage priority, and change live-region
-  copy only when the rendered text changes.
-- accept optional `CollabEmbedOptions.takeInitialPromptDraft?: () => string | undefined`,
-  threaded App → Session → Composer. The shell holds at most one 8,000-code-point/32-KiB
-  first-task draft in volatile memory bound to the created source/instance/generation. Drain
-  it once only in live writable Control, with healthy relay, no active Ask, an empty ordinary
-  draft, and no photo draft/pending photo send. Never overwrite existing text, fill AskEditor,
-  send a prompt, synthesize Enter, persist the text, or reapply it on reconnect/rerender.
-  Disposal or cancellation clears the holder; an explicit retry of opening the same ready
-  binding may retain it if failure occurred before mounting.
-- treat browser network APIs only as remeasurement triggers; derive gateway and relay state from
-  `CollabEmbedOptions.probeGateway` (or the default same-origin `GET /api/v1/health` probe when `probeGateway` is omitted), passive host traffic, and optional encrypted health ping/pong frames;
-- when `probeGateway(signal)` is supplied, it returns `Promise<GatewayProbeResult>` (`"healthy" | "unavailable" | "forbidden"`), where `"healthy"` requires a parsed session list from the selected source's `GET <origin>/api/v1/sessions`, `"forbidden"` reflects a readable `403` and sets `gatewayHealth.state = "forbidden"` (`PathHealthState` includes `"forbidden"`, and the embedded client's shell chip shows `Access withdrawn`) without refreshing the relay or scheduling automatic probe retries (a later visibility or online transition may probe once more), and `"unavailable"` follows the existing degraded/unreachable recovery path;
-- when `CollabEmbedOptions.browserRecognitionEnabled` is `true` (from `speech.browserRecognition`), enable the opt-in Web Speech (`SpeechRecognition` / `webkitSpeechRecognition`) microphone control in writable **Control** sessions only: configure the recognizer with `lang = navigator.language || "en-US"`, `continuous = true`, `interimResults = true`, one alternative (`maxAlternatives = 1`), and no automatic restart; enforce a `10 s` start watchdog (`SPEECH_START_TIMEOUT_MS`), a `120 s` capture limit (`SPEECH_CAPTURE_LIMIT_MS`), and a `5 s` stop watchdog (`SPEECH_STOP_TIMEOUT_MS`); bound the review buffer to `128` segments (`MAX_SPEECH_SEGMENTS`), `8,000` Unicode code points (`MAX_SPEECH_CODEPOINTS`), and `32 KiB` UTF-8 (`MAX_SPEECH_BYTES`); use the fixed keyboard-dictation help `"Use your keyboard's microphone key to dictate into this box. iPhone: Settings → General → Keyboard → Enable Dictation. Dictation never sends — tap Send when the text is right."` and pre-start disclosure `"Your browser or OS may send audio to its speech provider before any OMP prompt is sent."`; keep recognized text in the editable review buffer until the user explicitly taps **Use text**; and keep **Use text** separate from **Send**;
-- keep a submitted host UI response visible and disabled until `ui-request-end`; resend it after a
-  fresh welcome, and accept a targeted end frame as the idempotent acknowledgement when the host
-  already settled that request;
-- for writable photo prompts, use the pinned v3 `{ t: "prompt", text, images }` frame without a
-  gateway media endpoint or protocol revision; each `ImageContent` is a normalized `image/jpeg`
-  data block, with at most four blocks and at most 1 MiB of decoded bytes per block;
-- accept only JPEG, PNG, and WebP source files up to 24 MiB and at most an 8,192px edge or
-  20 megapixels, re-encode to a maximum 2,048px edge in browser memory so source filenames and
-  EXIF/location metadata do not cross the relay, and drop preview/base64 references on remove,
-  host-confirmed transcript echo, or client disposal;
-- expose separate user actions and hidden inputs for **Take photo**
-  (`capture="environment"`) and **Choose existing** (no `capture`); both feed the same bounded
-  preparation path, and cancelling either chooser sends nothing;
-- retain a sent photo draft until an exact `collab-prompt` transcript entry acknowledges its text
-  and image blocks after the recorded pre-send entry; if that baseline is absent during reconnect,
-  no older identical entry may acknowledge the draft. After five seconds without acknowledgement,
-  keep the draft and offer retry only while the relay is healthy;
-- permit image-only submission by supplying the explicit neutral text `Please inspect this photo.`
-  (or its plural); user-entered text takes precedence unchanged;
-
-Separate-page design alternative (not the shipped launch path):
-
-1. open `/client/` synchronously during the user's tap;
-2. the child creates a `MessageChannel` and sends a ready message to its exact same-origin opener;
-3. the opener fetches the launch response and transfers the capability through the channel;
-4. both sides validate origin, source window, one-time state, and message shape;
-5. the opener drops its reference immediately after acknowledgement;
-6. the child closes on timeout or origin mismatch.
-
-The separate-page alternative is not valid for installed Android PWA launch: Chrome may reuse the standalone window,
-leaving `/client/` without an opener and destroying the only in-memory sender. Installed mode must use the preferred
-same-document mount.
-
-Do not put the capability in a path, query, fragment, window name, BroadcastChannel, clipboard, or service-worker message.
+- Capability and role invariants: parse `capability` with pinned upstream OMP code, derive read-only **View** from the absence of a write token (omitting optional `readOnly` in a host welcome never upgrades **View** or replays a mutating frame), keep the bootstrap out of production devtools globals, DOM attributes/text/forms, `location`, `window.name`, `BroadcastChannel`, clipboard, service-worker messages, and storage, and clear all references and invoke `onDispose` on exit.
+- Navigation and reload: installed PWAs always mount `startCollabWithCapability` in the current document because standalone Android windows need not preserve `window.opener` (a same-origin child window transferring the capability once over a validated `MessageChannel` is valid only when an exact-origin opener exists). Direct `GET /client/` requests serve the `no-store` `/` shell so reloading returns to the directory.
+- Loading progress: `CollabEmbedState.loading` publishes `{ received, total } | null` snapshot-chunk counters through `onStateChange` (`null` when idle or unmounted).
+- First-task draft: optional `CollabEmbedOptions.takeInitialPromptDraft?: () => string | undefined` drains at most one shell-held draft (`<= 8,000` code points / `32` KiB, bound to `sourceKey`, `instanceId`, and `generation`) once into an empty composer in live writable **Control** when the relay is healthy and no Ask or photo draft/send is active, never auto-sending or reapplying on reconnect.
+- Gateway probe: `probeGateway(signal)` returns `Promise<GatewayProbeResult>` (`"healthy" | "unavailable" | "forbidden"`, defaulting to `GET /api/v1/health` when omitted and `GET <source>/api/v1/sessions` in **OMP Sessions**); `"forbidden"` sets `gatewayHealth.state = "forbidden"` (`PathHealthState`) and halts relay refresh and automatic probe retries until a foreground or online transition.
+- Host UI responses: submitted host UI responses stay disabled until `ui-request-end`, resend after a fresh welcome, and accept a targeted `ui-request-end` as an idempotent acknowledgement.
+- Photo prompts: writable **Control** photo prompts use OMP's encrypted v3 `{ t: "prompt", text, images }` relay frame (`<= 4` normalized `ImageContent` `image/jpeg` blocks `<= 1` MiB each, supplying `"Please inspect this photo."` or `"Please inspect these photos."` when text is empty and keeping staged drafts until a post-baseline `collab-prompt` transcript echo arrives).
+- Speech and media bounds: `browserRecognitionEnabled` gates Web Speech input; recognizer and image bounds are in [Embedded integration](../packages/collab-client/README.md#embedded-integration) and user flows in [View and Control](USAGE.md#view-and-control).
 
 ## 6. Capability lifetime
 
-The gateway has no secret store. A capability exists in gateway memory only while resolving one
-authorized launch and returning its no-store response. It is then passed to the pinned client’s
-in-memory bootstrap. Never place it in a URL, redirect, log, fixture, diagnostic, file, or browser
-cache; reload returns to the directory.
+How long does a capability exist in memory? The gateway has no secret store: a capability exists in `omp-gatewayd` memory only while resolving one authorized `link` query and returning one `no-store` launch response, and in volatile collaboration-client memory while mounted. It never enters URLs, redirects, logs, fixtures, diagnostics, files, or browser caches or storage, and reloading returns to the directory ([Capability handling](SECURITY.md#6-capability-handling)).
 
 ## 7. Revisions and races
 
-- Each registry mutation increments a daemon-wide revision.
-- A client starts a new directory epoch by aborting any prior snapshot, closing its prior SSE source, fetching one authenticated snapshot, and only then opening SSE.
-- Within one connected epoch, a response or event with a lower revision is ignored. Duplicate same-revision snapshots remain idempotent.
-- The gateway emits a metadata-free `keepalive` SSE event every 5 seconds. After 12 seconds without a directory event or keepalive, a loaded dashboard marks gateway updates paused but retains the last authenticated metadata with a freshness timestamp and closes the stream. Initial snapshots time out after 4 seconds; recovery snapshots use 20 seconds. Retry delays are randomly selected from the upper half of exponentially growing caps of 1/2/4/8/16/30 seconds before a new SSE epoch. This is the current implementation, not ADR-016's original 4-second/1/2/4-second recovery policy; the discrepancy is recorded in the current audit note in [DECISIONS.md](DECISIONS.md#current-implementation-audit--2026-09-14).
-- A dashboard page that the browser freezes (Page Lifecycle `freeze`, which Chrome on Android delivers about a minute after the page is hidden) closes its stream and cancels its liveness and retry timers without showing a failure. When the page becomes visible again, the ordinary resume path loads a fresh snapshot and opens a new stream. A briefly hidden page keeps its stream.
-- A changed PWA shell caches completely before its worker calls `skipWaiting`. Activation deletes prior shell caches and claims clients; it never navigates a client, because a window client's URL is its creation URL rather than the route the page reached through the history API (ADR-018 amendment). An update-aware page reloads itself one second after its controller changes only while no launch is pending, no routed notification awaits its snapshot, and no collaboration client is mounted; otherwise the update applies when a failed launch returns to the directory or the user leaves collaboration. Activations by earlier workers may still navigate a client to no-store `/update/`, which the app synchronously replaces with `/`.
-- Launch requests carry the generation observed in the metadata response.
-- A mismatch never returns a capability.
-- Expired and removed records are indistinguishable to remote callers.
-- A session removed while a client page is opening closes or resets that page with a generic message.
-- In the web app, every session is addressed in memory by `SourceKey = id + "\0" + origin`, `SessionRef = { sourceKey, instanceId, generation, requestId? }`, and session map key `sourceKey + "\0" + instanceId`. The source key is a browser-only discriminator and is never concatenated into an OMP `instanceId` or sent in any HTTP request, route, or relay frame. Device-local triage records in `localStorage` use `omp.sessions.held-asks.v2` and `omp.sessions.dismissed.v2` carrying `sourceId` and `sourceOrigin`.
-- Remote fleet sources (`fleet.targets`) do not open `EventSource` streams. Each remote source maintains its own epoch, request sequence, revision, freshness timestamp, and error state, polling `GET <origin>/api/v1/sessions` with `{ mode: "cors", credentials: "omit", cache: "no-store", redirect: "error", signal }` on visible start and every 10 seconds while visible (at most 1 request in flight per source, 5-second request timeout, 35-second stale grace window before last-seen rows expire, 8 MiB body limit, and 1 s → 30 s jittered failure backoff). These session-list bodies use plain `JSON.parse` followed by metadata validation, not `parseJsonFrame`; duplicate keys therefore use last-key-wins semantics and the shared parser's 64-level nesting cap does not apply. A readable `403` transitions the remote source to `forbidden` (`Access withdrawn.`), clears its rows, disposes any active shell from that source, and pauses automatic polling until **Retry** or a foreground (`visibilitychange`, `pageshow`, or `online`) transition. Hidden or frozen pages abort in-flight remote polls without recording a failure and refresh immediately on `visibilitychange`, `pageshow`, or `online` before re-enabling stale actions. Within a remote source's current epoch, the latest completed request is authoritative (accepting a lower revision after a remote daemon restart) and older or prior-epoch responses are discarded; revisions are never compared across sources.
+How do revisions, epochs, and source keys order concurrent updates across the gateway and browser?
+
+- Monotonic registry revisions: each `SessionRegistry` mutation increments a daemon-wide integer `revision`.
+- Local directory epochs: starting a local directory epoch aborts any in-flight snapshot fetch, closes any prior `EventSource`, loads one authenticated `GET /api/v1/sessions` snapshot, and only then opens `GET /api/v1/events`; within one epoch, frames with a lower `revision` are ignored and same-revision snapshots are idempotent.
+- SSE liveness and freeze: `GET /api/v1/events` sends `keepalive` every 5 seconds; 12 seconds of silence closes the stream while keeping last-seen metadata in memory, using 4-second initial and 20-second recovery snapshot timeouts with upper-half jittered retry caps (`1`, `2`, `4`, `8`, `16`, `30` seconds), and Page Lifecycle `freeze` closes the stream cleanly until visible resume ([Availability behavior](ARCHITECTURE.md#5-availability-behavior)).
+- Shell updates: service-worker upgrades cache the full shell before `skipWaiting` and `clients.claim()` without navigating windows, idle pages reload after 1 second on `controllerchange`, and `GET /update/` serves the `no-store` `/` shell and scrubs to `/` ([Shell updates and caching](ARCHITECTURE.md#shell-updates-and-caching)).
+- Launch and removal races: launch requests send the observed `generation`; mismatches return `409 generation_mismatch` with no capability, removed and TTL-expired sessions both return `404 not_found`, and session removal while opening resets the view with a generic notice.
+- Source keys in memory: the browser addresses sessions by `SourceKey = id + "\0" + origin`, `SessionRef = { sourceKey, instanceId, generation, requestId? }`, and map key `sourceKey + "\0" + instanceId`, never concatenating `SourceKey` into `instanceId` or sending it on the wire (device-local triage keys in [Browser storage](../apps/web/README.md#browser-storage)).
+- Remote source polling: remote `fleet.targets` never open `EventSource` streams; each polls `GET <origin>/api/v1/sessions` with `{ mode: "cors", credentials: "omit", cache: "no-store", redirect: "error", signal }` ([Fleet sources](ARCHITECTURE.md#fleet-sources)).
+- Remote response parsing and epochs: remote session-list bodies use `JSON.parse` plus `parseSessionListResponse` (duplicate keys follow `JSON.parse` last-key-wins rather than `parseJsonFrame`); within one remote epoch, the latest completed response is authoritative across lower revisions after a remote daemon restart, and `revision` is never compared across sources.

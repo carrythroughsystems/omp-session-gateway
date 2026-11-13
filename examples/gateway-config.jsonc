@@ -1,3 +1,5 @@
+// Template for <configDir>/config.json (see docs/OPERATIONS.md#13-paths and #14-gateway-configuration-reference).
+// Strip // comments for strict JSON, keep owner-only permissions, and apply edits with bun apps/gateway/src/cli.js install.
 {
   "http": {
     "hostname": "127.0.0.1",
@@ -5,7 +7,7 @@
     "publicOrigin": "https://host.example.ts.net",
     // Opt-in: exact dashboard origins allowed to list and launch on this host,
     // and to create approved processes if the tern section below is enabled.
-    // The target must separately allow the user's Tailscale login below.
+    // This host must separately allow the user's Tailscale login below.
     "trustedDashboardOrigins": []
   },
   "auth": {
@@ -20,18 +22,20 @@
   "fleet": {
     // Optional; defaults to the public origin's first DNS label.
     "label": "host",
-    // Dashboard-side opt-in; at most seven explicitly configured gateway origins.
-    // Each target must trust this dashboard's publicOrigin. Reload the PWA after edits.
+    // Dashboard-side opt-in; at most seven { "id", "label", "origin" } objects (docs/OPERATIONS.md#multi-host-setup).
+    // Each target must trust this dashboard's publicOrigin. Re-run install and reload the PWA after edits.
     "targets": []
   },
   "speech": {
     // Keyboard dictation remains available without this optional browser recognizer.
     "browserRecognition": false
   }
+  // Optional fleet notifications ("notifications"): see docs/OPERATIONS.md#8-alerts-from-other-hosts.
   // Optional Tern creation is absent by default. To opt in on this execution host,
   // add a comma after speech, uncomment the block below, strip // comments when writing
-  // strict JSON to <configDir>/config.json, replace the synthetic paths, and re-run
-  // omp-gateway install --origin <origin> --allow <login>. Working-copy paths must equal
+  // strict JSON to <configDir>/config.json, replace the synthetic paths (and remove "window": "2" unless
+  // targeting a second open Tern window), and re-run bun apps/gateway/src/cli.js install --origin <origin> --allow <login>.
+  // Working-copy paths must equal
   // their realpath; profile.env is the complete CLI child environment (not merged with
   // process.env) and requires absolute HOME and PATH. Configure OMP inside Tern with
   // collab.autoStart=control first. Optional window targets a reassignable slot, not an identity:
@@ -43,13 +47,13 @@
   //   "window": "2",
   //   "projects": [
   //     {
-  //       "id": "alpha-founder",
-  //       "label": "Alpha Founder",
+  //       "id": "website",
+  //       "label": "Website",
   //       "workingCopies": [
   //         {
   //           "id": "main",
   //           "label": "main",
-  //           "path": "/home/user/Development/alpha-founder"
+  //           "path": "/home/user/Development/website"
   //         }
   //       ]
   //     }

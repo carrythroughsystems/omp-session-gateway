@@ -72,7 +72,7 @@ async function claimSurfaces(datedRecords: Record<string, true>): Promise<string
 // release: links resolve GitHub Latest, and commands derive the version from the download.
 test("install and download surfaces link to the latest release and pin no version", async () => {
   const latest = "https://github.com/carrythroughsystems/omp-session-gateway/releases/latest";
-  const gettingStarted = await section("README.md", "## Build and run");
+  const gettingStarted = await section("README.md", "## Get started");
   const firstRelease = gettingStarted.match(/\]\((https:\/\/github\.com\/carrythroughsystems\/omp-session-gateway\/releases\/[^)]+)\)/u)?.[1];
   expect(firstRelease, "the installation guide must start with the latest stable release").toBe(latest);
 
