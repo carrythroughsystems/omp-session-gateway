@@ -12,9 +12,9 @@ source locations, and required attributions are included at the stated archive p
 
 ## Bundled runtime dependencies
 
-### @oh-my-pi/pi-wire@18.18.0
+### @oh-my-pi/pi-wire@18.20.0
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/v18.18.0/packages/wire>
+- Source: <https://github.com/can1357/oh-my-pi/tree/v18.20.0/packages/wire>
 - License: MIT
 - Copyright: Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/runtime/@oh-my-pi__pi-wire/LICENSE`
@@ -187,8 +187,8 @@ source locations, and required attributions are included at the stated archive p
 
 ### @oh-my-pi/collab-web@16.3.6
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/collab-web>
-- Pinned source: tag `v18.18.0`, commit `b5a6b2f7e5b6606b6562e678ead83f21738f34a0`
+- Source: <https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266/packages/collab-web>
+- Pinned source: tag `v18.20.0`, commit `c308970263ae13744ea15ab67302e3dac840e266`
 - License: MIT
 - Copyright: Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/collab-web/LICENSE`
@@ -202,9 +202,9 @@ source locations, and required attributions are included at the stated archive p
   redacted capability errors; retained hub-family renderers; speech input; artwork exclusion; and
   the gateway's self-hosted PUA symbol fallback. All dispositions are in `upstream/UPSTREAM.json`.
 
-### @oh-my-pi/pi-utils@18.18.0 — vendored pure helpers only
+### @oh-my-pi/pi-utils@18.20.0 — vendored pure helpers only
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/b5a6b2f7e5b6606b6562e678ead83f21738f34a0/packages/utils/src>
+- Source: <https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266/packages/utils/src>
 - Exact source files: `marked.ts`, `marked/core.ts`, `marked/inline-closers.ts`,
   `marked/inline-text.ts`, `marked-list.ts`, `math-delimiters.ts`, and `bytes.ts`, copied without modifications
   into `packages/collab-client/upstream/src/vendor/pi-utils/`.

@@ -154,7 +154,7 @@ export function hasCanaryPrompt(entries: readonly unknown[], marker: string): bo
 
 /** Only the complete status line proves a rewind; a selected prompt or old transcript does not. */
 export function hasRewindConfirmation(pane: string): boolean {
-  return /^\s*(?:[✓✔]\s+)?Rewound to selected point\s*$/mu.test(pane);
+  return /^\s*(?:[✓✔]\s+)?Rewound (?:to selected point|1 turn|(?:[2-9]|[1-9]\d+) turns)\s*$/mu.test(pane);
 }
 
 function quote(value: string): string {

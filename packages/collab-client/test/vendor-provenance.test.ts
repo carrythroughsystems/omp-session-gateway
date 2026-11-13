@@ -16,6 +16,8 @@ function blobHash(bytes: Buffer): string {
 describe("embedded client provenance", () => {
   test("matches every pure helper to its recorded upstream blob", async () => {
     expect(provenance.schemaVersion).toBe(1);
+    expect(provenance.commit).toMatch(/^[a-f0-9]{40}$/);
+    expect(provenance.tree).toMatch(/^[a-f0-9]{40}$/);
     expect(provenance.tag).toBe(`v${manifest.dependencies["@oh-my-pi/pi-wire"]}`);
     expect(provenance.bunVersion).toBe("1.4.4");
     expect(provenance.additionalSources).toHaveLength(7);

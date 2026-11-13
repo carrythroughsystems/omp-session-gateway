@@ -1,4 +1,5 @@
 import type { AssistantMessage, HostFrame, SessionEntry, SessionHeader, SessionState } from "@oh-my-pi/pi-wire";
+import { AUTO_REJOIN_WINDOW_MS, MAX_AUTO_REJOINS, takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { GuestClient } from "../upstream/src/lib/client.ts";
 import { CollabSocket } from "../upstream/src/lib/socket.ts";
@@ -535,6 +536,253 @@ describe("CollabSocket browser lifecycle recovery", () => {
     expect(mutationSent).toBeFalse();
     expect(socket.sent).toHaveLength(1);
     client.close();
+  });
+
+  test("expires the upstream rejoin budget only outside its rolling window", () => {
+    const history: number[] = [];
+    expect(MAX_AUTO_REJOINS).toBe(3);
+    expect(AUTO_REJOIN_WINDOW_MS).toBe(300_000);
+    for (let i = 0; i < MAX_AUTO_REJOINS; i += 1) expect(takeAutoRejoin(history, 100)).toBeTrue();
+    expect(takeAutoRejoin(history, 100 + AUTO_REJOIN_WINDOW_MS - 1)).toBeFalse();
+    expect(takeAutoRejoin(history, 100 + AUTO_REJOIN_WINDOW_MS)).toBeTrue();
+    expect(history).toEqual([100 + AUTO_REJOIN_WINDOW_MS]);
+  });
+
+  test.each([TEST_LINK, TEST_CONTROL_LINK])("rejoins a shed guest once per welcome and retains View or Control capability", async link => {
+    const key = await importRoomKey(new Uint8Array(32));
+    const client = new GuestClient(link, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      expect(client.getSnapshot().phase).toBe("reconnecting");
+      for (let i = 0; i < 10; i += 1) client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(2);
+      const frames = await decodeFrames(socket, key);
+      expect(frames.map(frame => frame.t)).toEqual(["hello", "hello"]);
+      expect(frames[1]).toEqual(frames[0]);
+      expect(Object.hasOwn(frames[1]!, "writeToken")).toBe(link === TEST_CONTROL_LINK);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      expect(client.getSnapshot().readOnly).toBe(link === TEST_LINK);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("bounds successful resync rejoins and refuses further automatic snapshots", async () => {
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      for (let i = 1; i <= 3; i += 1) {
+        client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+        await socket.waitForSent(i + 1);
+        client.applyFrameForTest(TEST_WELCOME);
+        expect(client.getSnapshot().phase).toBe("live");
+      }
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      expect(client.getSnapshot().phase).toBe("ended");
+      expect(socket.sent).toHaveLength(4);
+      expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("clears a shed approval response instead of replaying a no-longer-held dialog", async () => {
+    const key = await importRoomKey(new Uint8Array(32));
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      const request = { reqId: 42, kind: "select" as const, title: "Allow?", options: ["Yes", "No"], approval: true };
+      client.applyFrameForTest({ t: "ui-request", request });
+      client.sendUiResponse(42, "Yes");
+      await socket.waitForSent(2);
+      expect(client.getSnapshot().uiResponsePending).toBeTrue();
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(3);
+      expect(client.getSnapshot().uiRequest).toBeNull();
+      expect(client.getSnapshot().uiResponsePending).toBeFalse();
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "ui-request", request });
+      expect(client.getSnapshot().uiRequest).toEqual(request);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "ui-response", "hello"]);
+      client.sendUiResponse(42, "No");
+      await socket.waitForSent(4);
+      client.applyFrameForTest({ t: "ui-request-end", reqId: 42 });
+      expect(client.getSnapshot().uiResponsePending).toBeFalse();
+      expect(client.getSnapshot().uiRequest).toBeNull();
+    } finally {
+      client.close();
+    }
+  });
+
+  test("retries a post-reconnect missing welcome through the same bounded rejoin budget", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_LINK, "test guest");
+    try {
+      client.connect();
+      FakeWebSocket.instances[0]!.open();
+      await FakeWebSocket.instances[0]!.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.refreshConnection();
+      const replacement = FakeWebSocket.instances[1]!;
+      replacement.open();
+      await replacement.waitForSent(1);
+      for (let i = 1; i <= 3; i += 1) {
+        expect(timers.pendingDelays()).toEqual([30_000]);
+        timers.runNext();
+        await replacement.waitForSent(i + 1);
+        expect(client.getSnapshot().phase).toBe("reconnecting");
+      }
+      timers.runNext();
+      expect(client.getSnapshot().phase).toBe("ended");
+      expect(timers.pendingDelays()).toEqual([]);
+      expect(replacement.sent).toHaveLength(4);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
+  test("retries an unwelcomed resync hello within the rejoin budget and then ends", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(2);
+      // MAX_AUTO_REJOINS (3) hellos inside AUTO_REJOIN_WINDOW_MS, each awaited for WELCOME_TIMEOUT_MS (30 s).
+      for (let sent = 3; sent <= 4; sent += 1) {
+        expect(timers.pendingDelays()).toEqual([30_000]);
+        timers.runNext();
+        await socket.waitForSent(sent);
+        expect(client.getSnapshot().phase).toBe("reconnecting");
+      }
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      timers.runNext();
+      expect(client.getSnapshot().phase).toBe("ended");
+      expect(client.getSnapshot().endedReason).toBe("timed out waiting for the host's welcome");
+      expect(timers.pendingDelays()).toEqual([]);
+      expect(socket.sent).toHaveLength(1 + MAX_AUTO_REJOINS);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
+  test("keeps a late non-resync error after a resync as a notice while the rejoin awaits its welcome", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(2);
+      // The pinned host still delivers asynchronous replies to frames sent before the shed on this
+      // transport (upstream host.ts `prompt failed: …`); they must not end the rejoin.
+      client.applyFrameForTest({ t: "error", message: "prompt failed: Error: provider unavailable" });
+      expect(client.getSnapshot().phase).toBe("reconnecting");
+      expect(client.getSnapshot().endedReason).toBeNull();
+      expect(client.getSnapshot().notices.map(notice => notice.message)).toContain("prompt failed: Error: provider unavailable");
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      expect(timers.pendingDelays()).toEqual([]);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
+  test("sends an in-flight dialog response before the rejoin hello and never replays it", async () => {
+    const key = await importRoomKey(new Uint8Array(32));
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "ui-request", request: { reqId: 42, kind: "select", title: "Allow?", options: ["Yes", "No"], approval: true } });
+      client.sendUiResponse(42, "Yes");
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      // The response is still being sealed when the resync arrives.
+      expect(socket.sent).toHaveLength(1);
+      await socket.waitForSent(3);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "ui-response", "hello"]);
+      expect(client.getSnapshot().uiResponsePending).toBeFalse();
+      expect(client.getSnapshot().uiRequest).toBeNull();
+      // The host answers the unregistered peer's response with another resync; the armed rejoin ignores it.
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      // Sends are sealed in order, so a replayed response would precede this sentinel.
+      client.sendAbort();
+      await socket.waitForSent(4);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "ui-response", "hello", "abort"]);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("drops an in-flight relay probe when a shed guest rejoins on the same transport", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "gateway-health-pong", seq: 0 });
+      client.remeasureRelay();
+      await socket.waitForSent(2);
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      timers.runNext();
+      await socket.waitForSent(3);
+      expect(client.getSnapshot().relayHealth.state).toBe("degraded");
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(4);
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      expect(client.getSnapshot().relayHealth.state).toBe("healthy");
+      expect(timers.pendingDelays()).toEqual([10_000]);
+      // The miss counted before the shed does not carry over: the next missed probe only degrades.
+      timers.runNext();
+      await socket.waitForSent(5);
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      timers.runNext();
+      await socket.waitForSent(6);
+      expect(client.getSnapshot().relayHealth.state).toBe("degraded");
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      client.close();
+      timers.restore();
+    }
   });
 
   test.each(["empty welcome", "final chunk", "entry count"] as const)("resends a pending UI response after reconnect completes via %s", async completion => {

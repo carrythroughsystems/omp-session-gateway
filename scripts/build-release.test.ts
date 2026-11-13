@@ -24,7 +24,7 @@ setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expectedRuntimeDependencies = [
-  "@oh-my-pi/pi-wire@18.18.0",
+  "@oh-my-pi/pi-wire@18.20.0",
   "agent-base@7.1.4",
   "asn1.js@5.4.1",
   "bn.js@4.12.5",
@@ -128,6 +128,20 @@ test("derives only the bundled runtime dependency closure from bun.lock", async 
   );
 });
 
+test("retains the reviewed upstream license bytes across the 18.20.0 client refresh", async () => {
+  const wire = RUNTIME_LICENSES["@oh-my-pi/pi-wire"];
+  expect(wire?.version).toBe("18.20.0");
+  expect(wire?.licenseDeclared).toBe("MIT");
+  expect(wire?.licenseConcluded).toBe("MIT");
+  for (const [path, digest] of [
+    ["licenses/runtime/@oh-my-pi__pi-wire/LICENSE", "90179611795093ae17d4a6bc6e06da450a8e54bbeb147a065b4127e1e4b407a7"],
+    ["licenses/collab-web/LICENSE", "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63"],
+    ["licenses/pi-utils-marked/LICENSE", "1a5e1001da72f22ed5d3d3378f6837900c8bb073ffddb7dd33a082dd7f8004d0"],
+  ] as const) {
+    expect(createHash("sha256").update(await readFile(join(root, path))).digest("hex")).toBe(digest);
+  }
+});
+
 test("SPDX namespace, lock digest, and creation time bind reproducibly to release source", async () => {
   const { lock, lockSha256, client } = await releaseInputs();
   expect(deterministicSource.created).toBe("2023-11-14T22:13:20Z");
@@ -147,7 +161,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.map(pkg => `${pkg.name}@${pkg.versionInfo}`)).toEqual([
     `omp-session-gateway@${PRODUCT_VERSION}`,
     "@oh-my-pi/collab-web@16.3.6",
-    "@oh-my-pi/pi-utils (vendored pure helpers)@18.18.0",
+    "@oh-my-pi/pi-utils (vendored pure helpers)@18.20.0",
     "Symbols Nerd Font Mono@v3.5.1",
     "Geist@v1.9.2",
     ...expectedRuntimeDependencies,
@@ -156,6 +170,8 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.find(pkg => pkg.name === "@oh-my-pi/collab-web")?.sourceInfo).toContain(client.commit);
   const parser = document.packages.find(pkg => pkg.name === "@oh-my-pi/pi-utils (vendored pure helpers)");
   expect(parser?.sourceInfo).toContain(client.commit);
+  expect(parser?.licenseDeclared).toBe("MIT");
+  expect(parser?.licenseConcluded).toBe("MIT AND BSD-3-Clause");
   expect(client.additionalSources.map(source => source.sourcePath)).toEqual([
     "packages/utils/src/marked.ts",
     "packages/utils/src/marked/core.ts",

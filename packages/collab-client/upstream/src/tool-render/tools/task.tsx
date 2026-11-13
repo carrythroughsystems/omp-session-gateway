@@ -10,8 +10,24 @@ const MISSING_YIELD_PREFIX = "SYSTEM WARNING: Subagent exited without calling yi
 interface TaskItemView {
 	id: string | null;
 	description: string | null;
+	/** Single-prompt instructions; null for a stepped spawn. */
 	assignment: string | null;
+	agent: string | null;
+	/** Ordered stages sent one prompt at a time (`task.steps`); empty for a `task` spawn. */
+	steps: string[];
 	isolated: boolean;
+}
+
+/** Read one item; args stream in token by token, so non-string steps (still partial) are skipped. */
+function taskItem(entry: Record<string, unknown>, agent: string | null): TaskItemView {
+	return {
+		id: str(entry.name) ?? str(entry.id),
+		description: str(entry.description),
+		assignment: str(entry.task) ?? str(entry.assignment),
+		agent: str(entry.agent) ?? agent,
+		steps: Array.isArray(entry.steps) ? entry.steps.filter(step => typeof step === "string") : [],
+		isolated: entry.isolated === true,
+	};
 }
 
 function taskItems(args: Record<string, unknown>): TaskItemView[] {
@@ -20,27 +36,40 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 		const items: TaskItemView[] = [];
 		for (const entry of raw) {
 			if (!isRecord(entry)) continue;
-			items.push({
-				id: str(entry.id),
-				description: str(entry.description),
-				assignment: str(entry.assignment),
-				isolated: entry.isolated === true,
-			});
+			items.push(taskItem(entry, str(args.agent)));
 		}
 		return items;
 	}
-	const flat: TaskItemView = {
-		id: str(args.id),
-		description: str(args.description),
-		assignment: str(args.assignment),
-		isolated: args.isolated === true,
-	};
-	return flat.id || flat.description || flat.assignment ? [flat] : [];
+	const flat = taskItem(args, str(args.agent));
+	return flat.id || flat.description || flat.assignment || flat.steps.length > 0 ? [flat] : [];
+}
+
+/** First non-blank line of the work: the assignment, else the first step. */
+function taskBrief(item: TaskItemView): string | null {
+	for (const text of [item.assignment, item.steps[0]]) {
+		if (text === undefined || text === null) continue;
+		const line = text.split("\n").find(l => l.trim() !== "");
+		if (line) return normalizeWs(line);
+	}
+	return null;
 }
 
 /** "Anna.Bob" nesting → "Anna>Bob" breadcrumb (mirrors the TUI's formatTaskId). */
 function taskIdLabel(id: string): string {
 	return id.includes(".") ? id.split(".").join(">") : id;
+}
+
+/**
+ * The agent cell of a result or progress row. Only a host-reported id is a navigation
+ * identity; without one the label is plain text, never a link to some agent called "agent".
+ */
+function AgentCell({ id, host }: { id: string | null; host?: ToolRenderHost }): ReactNode {
+	if (id === null) return <span className="tv-faint">agent</span>;
+	return (
+		<AgentLink id={id} host={host}>
+			{taskIdLabel(id)}
+		</AgentLink>
+	);
 }
 
 function fmtDuration(ms: number): string {
@@ -64,11 +93,13 @@ function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok"
 }
 
 function Summary({ args }: ToolRenderProps): ReactNode {
-	const agent = str(args.agent);
 	const resume = str(args.resume);
 	const tasks = taskItems(args);
+	// One badge when every spawn runs the same agent; mixed batches badge each row in the body.
+	const agents = new Set(tasks.map(t => t.agent));
+	const agent = agents.size === 1 ? tasks[0]?.agent : str(args.agent);
 	const first = tasks.length > 0 ? tasks[0] : null;
-	const label = first ? (first.description ?? first.id) : null;
+	const label = first ? first.description || first.id || taskBrief(first) : null;
 	return (
 		<>
 			{agent && <Badge tone="accent">{agent}</Badge>}
@@ -82,7 +113,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 /** Final snapshot for one agent: status row, output preview, error/abort notes. */
 function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolRenderHost }): ReactNode {
 	const { label, tone } = resultStatus(res);
-	const id = str(res.id) ?? "agent";
+	const id = str(res.id);
 	const description = str(res.description);
 	const stats: string[] = [];
 	const tokens = num(res.tokens);
@@ -112,11 +143,7 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	return (
 		<>
 			<Row
-				k={
-					<AgentLink id={id} host={host}>
-						{taskIdLabel(id)}
-					</AgentLink>
-				}
+				k={<AgentCell id={id} host={host} />}
 			>
 				<Badge tone={tone}>{label}</Badge> {res.truncated === true && <Badge tone="warn">truncated</Badge>}{" "}
 				{description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
@@ -143,7 +170,7 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 				: status === "running"
 					? ("accent" as const)
 					: undefined;
-	const id = str(p.id) ?? "agent";
+	const id = str(p.id);
 	const description = str(p.description);
 	const intent = str(p.lastIntent) ?? str(p.currentTool);
 	const bits: string[] = [];
@@ -155,11 +182,7 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 	if (durationMs) bits.push(fmtDuration(durationMs));
 	return (
 		<Row
-			k={
-				<AgentLink id={id} host={host}>
-					{taskIdLabel(id)}
-				</AgentLink>
-			}
+			k={<AgentCell id={id} host={host} />}
 		>
 			<Badge tone={tone}>{status}</Badge> {description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
 			{intent && <span className="tv-muted">{truncate(normalizeWs(intent), 64)}</span>}{" "}
@@ -215,22 +238,25 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{tasks.length > 0 && (
 				<div className="tv-list">
 					{tasks.map((t, i) => (
-						<div key={t.id ?? i}>
+						<div key={t.id || i}>
 							<Row
 								k={
-									t.id ? (
-										<AgentLink id={t.id} host={host}>
-											{taskIdLabel(t.id)}
-										</AgentLink>
-									) : (
-										<Badge tone="accent">{`#${i + 1}`}</Badge>
-									)
+									// A requested name is not an agent id: upstream allocates `Name-2` once the name is
+									// taken, so only progress and result rows, which carry the host's id, link.
+									<Badge tone="accent">{t.id ? taskIdLabel(t.id) : `#${i + 1}`}</Badge>
 								}
 							>
+								{t.agent && <Badge>{t.agent}</Badge>}{" "}
+								{t.steps.length > 0 && (
+									<Badge>{`${t.steps.length} ${t.steps.length === 1 ? "step" : "steps"}`}</Badge>
+								)}{" "}
 								{t.isolated && <Badge>isolated</Badge>}{" "}
 								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
 							</Row>
-							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
+							{t.assignment && <Output text={t.assignment} maxLines={6} title="task" />}
+							{t.steps.map((step, n) => (
+								<Output key={n} text={step} maxLines={4} title={`step ${n + 1}/${t.steps.length}`} />
+							))}
 						</div>
 					))}
 				</div>
@@ -238,7 +264,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{ordered.length > 0 && (
 				<div className="tv-list">
 					{ordered.map((res, i) => (
-						<AgentResult key={str(res.id) ?? i} res={res} host={host} />
+						<AgentResult key={str(res.id) || i} res={res} host={host} />
 					))}
 					{footer}
 				</div>
@@ -246,7 +272,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{showProgress && (
 				<div className="tv-list">
 					{progress.map((p, i) => (
-						<AgentProgressRow key={str(p.id) ?? i} p={p} host={host} />
+						<AgentProgressRow key={str(p.id) || i} p={p} host={host} />
 					))}
 				</div>
 			)}

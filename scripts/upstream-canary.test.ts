@@ -282,6 +282,16 @@ describe("lifecycle evidence", () => {
 
   test("requires a complete positive rewind status, not selection, failure, or quoted text", () => {
     expect(hasRewindConfirmation("header\n  Rewound to selected point  \nfooter")).toBe(true);
+    for (const status of ["Rewound 1 turn", "Rewound 2 turns", "Rewound 10 turns", "✓ Rewound 100 turns"]) {
+      expect(hasRewindConfirmation(`header\n  ${status}  \nfooter`)).toBe(true);
+    }
+    for (const status of [
+      "Rewound 0 turns", "Rewound 01 turns", "Rewound 1 turns", "Rewound 2 turn",
+      "Rewound -1 turn", "Rewound 1.5 turns", "selected: Rewound 2 turns",
+      "Rewound 2 turns failed", "Rewound 2 turns?", "Rewind undone",
+    ]) {
+      expect(hasRewindConfirmation(status)).toBe(false);
+    }
     expect(hasRewindConfirmation("Already at this point")).toBe(false);
     expect(hasRewindConfirmation("selected: Rewound to selected point")).toBe(false);
     expect(hasRewindConfirmation("Rewound to selected point failed")).toBe(false);

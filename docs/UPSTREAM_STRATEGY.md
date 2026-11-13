@@ -42,6 +42,10 @@ Cite the merged general-purpose collaboration and discovery contribution ([PR #1
 
 Entries below are dated upstream compatibility reviews and are kept as written.
 
+### v18.20.0 — 2026-11-13
+
+`v18.20.0` (`c308970263ae13744ea15ab67302e3dac840e266`, tree `ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) keeps the registry, collab settings, `docs/collab.md` and the native IPC sources byte-identical to v18.18.0, so registry v1, the discovery format, the query contract, the relay envelope and the `18.1.20` minimum are unchanged. Host per-peer backlog shedding adds `error.resync` and re-hello recovery, and `select` requests gain optional `approval` metadata without a new response shape. `packages/collab-web` changes `lib/client.ts` and the Ask and task renderers, including HTML-form Ask results; the embedded client adopts those in its own reviewed refresh. Upstream `7027a619a41c1eccdae6a5f07de91c43e2a487e3` changes the successful rewind status to `Rewound N turns`, which the canary matcher now accepts alongside the old text. Source review only: no candidate, qualification or installed-byte smoke is claimed, and published v0.11.0 keeps its v18.18.0 qualification.
+
 ### v18.18.0 — 2026-11-07
 
 v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree

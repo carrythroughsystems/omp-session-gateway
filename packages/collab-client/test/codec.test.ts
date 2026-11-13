@@ -22,6 +22,13 @@ describe("upstream wire and pure byte helper", () => {
     expect(unpackEnvelope(new Uint8Array(3))).toBeNull();
   });
 
+  test("speaks the collaboration protocol version of the minimum supported host", () => {
+    // OMP 18.1.20's host refuses any other hello version with `protocol mismatch` (pi-wire 18.1.20
+    // index.ts:397 declares 3); raising it is a minimum-host decision, not a dependency bump.
+    expect(wire.COLLAB_PROTO).toBe(3);
+    expect(wire.ENVELOPE_HEADER_LENGTH).toBe(4);
+  });
+
   test("copies sliced and shared buffers but reuses whole ArrayBuffers", () => {
     const bytes = new Uint8Array([1, 2, 3]);
     expect(asStrictBytes(bytes)).toBe(bytes);

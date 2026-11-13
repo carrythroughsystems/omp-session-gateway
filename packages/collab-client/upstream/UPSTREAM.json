@@ -1,58 +1,59 @@
 {
   "repository": "https://github.com/can1357/oh-my-pi",
-  "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
-  "tag": "v18.18.0",
+  "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+  "tree": "ba890953dd69eb4bf73bb7233bbe50ccfacd6912",
+  "tag": "v18.20.0",
   "package": "@oh-my-pi/collab-web",
   "packageVersion": "16.3.6",
   "sourcePath": "packages/collab-web",
-  "observedAt": "2026-11-06",
+  "observedAt": "2026-11-13",
   "bunVersion": "1.4.4",
   "schemaVersion": 1,
   "additionalSources": [
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/marked.ts",
       "vendoredPath": "src/vendor/pi-utils/marked.ts",
       "blob": "75369d2cdb83f360ade03cafa325858ef631bce6"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/marked/core.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/core.ts",
       "blob": "074f73c1bce275c2c8ec7ec6af35640dc0c18da5"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/marked/inline-closers.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/inline-closers.ts",
       "blob": "020cb64caebfa52630e33082653c607b3ecdea45"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/marked/inline-text.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/inline-text.ts",
       "blob": "f2072e9036048ef86d479cf2336336e7f893329b"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/marked-list.ts",
       "vendoredPath": "src/vendor/pi-utils/marked-list.ts",
       "blob": "f7fd8fb4ab5147576345f9427f9b8c05c4bf7fd0"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "sourcePath": "packages/utils/src/math-delimiters.ts",
       "vendoredPath": "src/vendor/pi-utils/math-delimiters.ts",
       "blob": "dd0dcbb7fe62d1159f51150bc2d3fdad2ed8bc4f"
@@ -61,8 +62,8 @@
       "package": "@oh-my-pi/pi-utils",
       "sourcePath": "packages/utils/src/bytes.ts",
       "vendoredPath": "src/vendor/pi-utils/bytes.ts",
-      "packageVersion": "18.18.0",
-      "commit": "b5a6b2f7e5b6606b6562e678ead83f21738f34a0",
+      "packageVersion": "18.20.0",
+      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
       "blob": "2e003975f10be65ceed83e73b5999ce6ba0160b0"
     }
   ],
@@ -105,6 +106,53 @@
   ],
   "localPatches": {
     "active": [
+      {
+        "id": "legacy-ask-and-task",
+        "purpose": "Adopt HTML-form Ask and named task/steps rendering while retaining question cards and task id/assignment for older supported hosts; never mount supplied form HTML; show the host's result text when a form records no answers; label a task summary by its first non-empty field.",
+        "files": [
+          "src/tool-render/tools/ask.tsx",
+          "src/tool-render/tools/task.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders HTML-form answers and selected-option notes without mounting HTML"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "retains older question cards and task assignments"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "renders named tasks and ordered steps"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "shows the host's result text when a form ask records no answers"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "summarizes a task by its first non-empty label"
+          }
+        ],
+        "upstreamStatus": "upstream now renders current HTML forms and task fields only; older hosts remain supported by the gateway",
+        "removeWhen": "The supported host floor no longer includes question-card Ask or legacy task fields."
+      },
+      {
+        "id": "task-drilldown-by-agent-id",
+        "purpose": "Link task cards to subagent transcripts only through the agent ids the host reports in progress and results; a requested task name or id can name an earlier agent.",
+        "files": [
+          "src/tool-render/tools/task.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "opens only the agent id the host reports, never an earlier agent holding the requested name"
+          }
+        ],
+        "upstreamStatus": "upstream 18.18.0 and 18.20.0 link the requested task name or id, which upstream allocates as Name-2 when an earlier agent holds Name",
+        "removeWhen": "Upstream links task cards only by host-reported agent ids."
+      },
       {
         "id": "safe-markdown-links",
         "purpose": "Reject unsafe link/image schemes after entity decoding, source-tab normalization and browser URL parsing in settled and streaming Markdown; preserve rendering for malformed image URLs.",
@@ -199,7 +247,7 @@
       },
       {
         "id": "bounded-room-recovery",
-        "purpose": "Bound established relay-room replacement recovery to six retries and retain per-attempt handshake deadlines.",
+        "purpose": "Bound relay-room replacement to six transport retries; adapt upstream's separate three-rejoin budget to the gateway's per-transport welcome state; an in-place resync rejoin keeps upstream's once-welcomed error handling, so a late reply to a frame sent before the shed stays a notice.",
         "files": [
           "src/lib/client.ts",
           "src/lib/socket.ts"
@@ -212,6 +260,18 @@
           {
             "file": "packages/collab-client/test/socket.test.ts",
             "case": "times out a blackholed replacement handshake and continues jittered retry"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "retries a post-reconnect missing welcome through the same bounded rejoin budget"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "retries an unwelcomed resync hello within the rejoin budget and then ends"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "keeps a late non-resync error after a resync as a notice while the rejoin awaits its welcome"
           }
         ],
         "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
@@ -235,7 +295,7 @@
       },
       {
         "id": "health-and-response-ack",
-        "purpose": "Retain metadata-free gateway probes, encrypted health frames, object sealing, pending UI-response acknowledgements and welcome timer extraction.",
+        "purpose": "Retain metadata-free probes, encrypted health frames, object sealing and transport-reconnect response acknowledgements; on upstream resync, clear shed-peer responses and drop any in-flight relay probe.",
         "files": [
           "src/lib/browser-recovery.ts",
           "src/lib/client.ts",
@@ -250,6 +310,18 @@
           {
             "file": "packages/collab-client/test/codec.test.ts",
             "case": "round-trips offset encrypted health and acknowledgement frames"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "clears a shed approval response instead of replaying a no-longer-held dialog"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "sends an in-flight dialog response before the rejoin hello and never replays it"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "drops an in-flight relay probe when a shed guest rejoins on the same transport"
           },
           {
             "file": "apps/web/e2e/launch.e2e.ts",

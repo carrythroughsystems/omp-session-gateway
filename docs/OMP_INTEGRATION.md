@@ -11,8 +11,8 @@ Production deployment requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact l
 | Surface | Pin or contract | Notes |
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum OMP version supplying the native local registry (`collab.autoStart`). |
-| Engineering host baseline | `v18.18.0` (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`) | Exact OMP commit and Git tree (`cc847a53faf634167bde0ae8c12cb1d6ef38a412`) in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). |
-| Embedded browser client | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md) | Independent `collab-web` source, `@oh-my-pi/pi-wire` dependency, and vendored `pi-utils` helper provenance. |
+| Engineering host baseline | `v18.20.0` (`c308970263ae13744ea15ab67302e3dac840e266`) | Exact OMP commit and Git tree (`ba890953dd69eb4bf73bb7233bbe50ccfacd6912`) in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). |
+| Embedded browser client | `v18.20.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.20.0`) | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md): independent `collab-web` source, wire dependency, and vendored `pi-utils` helper provenance, with bounded resync rejoin and older-host rendering retained. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for `omp-gateway` (the CLI), `omp-gatewayd` (the daemon), and release archives. |
 
 For the latest release and its qualified hardware matrix, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
@@ -20,6 +20,8 @@ For the latest release and its qualified hardware matrix, see [Current claim](CO
 ## Additive activity compatibility
 
 Under registry v1 ([Protocol](PROTOCOL.md)), the gateway validates only the fields it reads and ignores unknown additive fields ([ADR-028](DECISIONS.md#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)). Any snapshot naming `prompt`, `question`, `options`, `prefill`, `answer`, `requestId`, or `count` is refused as a privacy violation.
+
+The minimum host stayed at `18.1.20` when the engineering baseline moved to `v18.20.0`: its registry and native IPC sources are unchanged from `v18.18.0`, and the additive guest resync and `select.approval` markers affect the embedded browser client, not the gateway's metadata registry reader.
 
 OMP hosts (one running `omp` process per collaboration entry) at `18.2.9` or newer ([PR #12844](https://github.com/can1357/oh-my-pi/pull/12844)) emit optional boolean `busy` (OMP's `session.isStreaming` state): `true` while running a turn, `false` while idle, and unknown when omitted or `null`. OMP `18.1.20`–`18.2.8` hosts appear in the directory with unknown activity; `busy` is not proof of task completion or process exit.
 

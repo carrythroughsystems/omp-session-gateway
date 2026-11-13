@@ -88,8 +88,8 @@ interface RuntimeLicenseMetadata {
 
 export const RUNTIME_LICENSES: Readonly<Record<string, RuntimeLicenseMetadata>> = {
   "@oh-my-pi/pi-wire": {
-    version: "18.18.0",
-    source: "https://github.com/can1357/oh-my-pi/tree/v18.18.0/packages/wire",
+    version: "18.20.0",
+    source: "https://github.com/can1357/oh-my-pi/tree/v18.20.0/packages/wire",
     licenseDeclared: "MIT",
     licenseConcluded: "MIT",
     copyrightText: "Copyright (c) 2025-2026 Can Bölük\nCopyright (c) 2026 Stencil Labs, Inc.",

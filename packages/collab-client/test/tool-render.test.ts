@@ -2,9 +2,15 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView, type ToolViewProps } from "../upstream/src/tool-render/ToolView";
-import { click, installDomGlobals, mount, queryAll, restoreDomGlobals, unmountAll } from "./react-dom-harness";
+import { click, installDomGlobals, mount, queryAll, restoreDomGlobals, textOf, unmountAll } from "./react-dom-harness";
 
 const render = (props: ToolViewProps): string => renderToStaticMarkup(createElement(ToolView, { defaultOpen: true, ...props }));
+
+/** Marker in the key cell of the question-card option row labelled `label`. */
+function optionMarker(html: string, label: string): string | undefined {
+  const row = new RegExp(`<span class="tv-row-key"><span(?: class="[^"]*")?>([●○■□])</span></span><span class="tv-row-val"><span(?: class="[^"]*")?>${label}</span>`);
+  return row.exec(html)?.[1];
+}
 
 describe("tool result image safety", () => {
   beforeEach(installDomGlobals);
@@ -46,6 +52,166 @@ describe("tool result image safety", () => {
 });
 
 describe("tool renderers across supported OMP releases", () => {
+  test("renders HTML-form answers and selected-option notes without mounting HTML", () => {
+    const html = render({
+      name: "ask",
+      args: { html: '<form><legend>Release gate</legend><input name="ship"><script>alert(1)</script></form>' },
+      result: { content: [{ type: "text", text: "host result text" }], details: {
+        answers: [{ name: "ship", question: "Ship & test?", answer: "<img src=x onerror=alert(1)>" }],
+        notes: [
+          { name: "ship", question: "Ship & test?", option: "Yes", text: "after review" },
+          { name: "other", question: "Ship & test?", option: "No", text: "must not leak" },
+          { name: 3, question: "Ship & test?", option: "No", text: "malformed note" },
+        ],
+        timedOut: true,
+      } },
+    });
+    // The recorded answer, not the form outline, supplies the question.
+    expect(html).toContain("Ship &amp; test?");
+    expect(html).not.toContain("Release gate");
+    expect(html).not.toContain("host result text");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("after review");
+    expect(html).toContain("auto-selected after timeout");
+    expect(html).not.toContain("must not leak");
+    expect(html).not.toContain("malformed note");
+    expect(html).not.toContain("<form");
+    expect(html).not.toContain("<input");
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img");
+  });
+
+  test("shows the host's result text when a form ask records no answers", () => {
+    // Upstream ask.ts returns this text with `details: { answers: [] }` for a form without named controls.
+    const noControls = render({
+      name: "ask", args: { html: "<form><p>Pick one</p></form>" },
+      result: { content: [{ type: "text", text: "Error: the form has no named controls. Put at least one <input> inside the <form>." }], details: { answers: [] } },
+    });
+    expect(noControls).toContain("Error: the form has no named controls.");
+    expect(noControls).not.toContain("<input");
+    const timedOut = render({
+      name: "ask", args: { html: '<form><input name="a"></form>' },
+      result: { content: [{ type: "text", text: "No answer before the timeout" }], details: { answers: [], timedOut: true } },
+    });
+    expect(timedOut).toContain("No answer before the timeout");
+  });
+
+  test("renders pending form outlines as text and preserves malformed-result fallback", () => {
+    const pending = render({
+      name: "ask", args: { html: '<form><legend>Choose &amp; review</legend><input name="a"><input name="a"><textarea name="b"></textarea><input type="hidden" name="secret"></form>' },
+      running: true,
+    });
+    expect(pending).toContain("Choose &amp; review");
+    expect(pending).toContain("2 fields");
+    expect(pending).not.toContain("<form");
+    expect(pending).not.toContain("<textarea");
+    const failed = render({
+      name: "ask", args: { html: "<form></form>" },
+      result: { content: [{ type: "text", text: "form unavailable" }], details: { answers: [{ question: null }] } },
+    });
+    expect(failed).toContain("form unavailable");
+  });
+
+  test("retains older question cards and task assignments", () => {
+    // 18.18-era multi-question details: `results[]` correlated by id, deliberately out of order.
+    const ask = render({
+      name: "ask",
+      args: { questions: [
+        { id: "ship", question: "Ship this build?", options: [{ label: "Ship now" }, { label: "Hold" }] },
+        { id: "extra", question: "Anything else?", options: [{ label: "Nothing" }] },
+        { id: "channel", question: "Which channel?", options: [{ label: "Beta" }] },
+      ] },
+      result: { content: [{ type: "text", text: "legacy fallback text" }], details: { results: [
+        { id: "extra", question: "Anything else?", options: ["Nothing"], multi: false, selectedOptions: [], customInput: "Custom reply text" },
+        { id: "ship", question: "Ship this build?", options: ["Ship now", "Hold"], multi: false, selectedOptions: ["Ship now"], note: "after review" },
+        { id: "channel", question: "Which channel?", options: ["Beta"], multi: false, selectedOptions: [] },
+      ] } },
+    });
+    expect(ask).toContain("3 questions");
+    expect(optionMarker(ask, "Ship now")).toBe("●");
+    expect(optionMarker(ask, "Hold")).toBe("○");
+    expect(optionMarker(ask, "Nothing")).toBe("○");
+    expect(optionMarker(ask, "Beta")).toBe("○");
+    expect(ask).toContain('<span class="tv-row-key">✎</span><span class="tv-row-val"><span class="tv-ok-text">Custom reply text</span>');
+    expect(ask).toContain('<span class="tv-row-key">note:</span><span class="tv-row-val"><span class="tv-muted">after review</span>');
+    expect(ask.split("no selection")).toHaveLength(2);
+    const [ship, extra, channel] = ["Ship this build?", "Anything else?", "Which channel?"].map(question => ask.lastIndexOf(question));
+    expect(ask.indexOf("after review")).toBeGreaterThan(ship!);
+    expect(ask.indexOf("after review")).toBeLessThan(extra!);
+    expect(ask.indexOf("Custom reply text")).toBeGreaterThan(extra!);
+    expect(ask.indexOf("Custom reply text")).toBeLessThan(channel!);
+    expect(ask.indexOf("no selection")).toBeGreaterThan(channel!);
+    expect(ask).not.toContain("legacy fallback text");
+    // Single-question details are flat.
+    const flat = render({
+      name: "ask", args: { question: "Deploy where?", options: ["Blue", "Green"] },
+      result: { content: [], details: { question: "Deploy where?", options: ["Blue", "Green"], multi: false, selectedOptions: ["Green"] } },
+    });
+    expect(optionMarker(flat, "Green")).toBe("●");
+    expect(optionMarker(flat, "Blue")).toBe("○");
+    expect(flat).not.toContain("no selection");
+    const task = render({
+      name: "task", args: { agent: "legacy-agent", tasks: [{ id: "old-task", description: "Old description", assignment: "Old assignment" }] },
+    });
+    expect(task).toContain('<span class="tv-badge tv-badge--accent">legacy-agent</span>');
+    expect(task).toContain('<span class="tv-row-key"><span class="tv-badge tv-badge--accent">old-task</span></span>');
+    expect(task).toContain("Old description");
+    expect(task).toContain("Old assignment");
+    const flatTask = render({ name: "task", args: { agent: "legacy-agent", id: "flat-task", description: "Flat description", assignment: "Flat assignment" } });
+    for (const text of ["flat-task", "Flat description", "Flat assignment"]) expect(flatTask).toContain(text);
+  });
+
+  test("renders named tasks and ordered steps", () => {
+    const html = render({
+      name: "task", args: { tasks: [
+        { name: "Refresh", agent: "worker", task: "Import source", steps: ["Review patches", "Run proofs"] },
+        { name: "Audit", agent: "auditor", task: "Inspect result", steps: [null, 3] },
+      ] },
+    });
+    for (const name of ["Refresh", "Audit"]) {
+      expect(html).toContain(`<span class="tv-row-key"><span class="tv-badge tv-badge--accent">${name}</span></span>`);
+    }
+    for (const agent of ["worker", "auditor"]) expect(html).toContain(`<span class="tv-badge">${agent}</span>`);
+    expect(html.split("steps</span>")).toHaveLength(2);
+    expect(html).toContain("2 steps");
+    for (const text of ["Import source", "Inspect result", "Review patches", "Run proofs"]) expect(html).toContain(text);
+    expect(html.indexOf("Import source")).toBeLessThan(html.indexOf("Review patches"));
+    expect(html.indexOf("Review patches")).toBeLessThan(html.indexOf("Run proofs"));
+    expect(html.indexOf("Run proofs")).toBeLessThan(html.indexOf("Inspect result"));
+    expect(html).toContain("step 1/2");
+    expect(html).toContain("step 2/2");
+    expect(html).not.toContain("step 1/0");
+  });
+
+  test("summarizes a task by its first non-empty label", () => {
+    // Upstream accepts an empty task name and generates the agent name itself.
+    const summary = render({ name: "task", args: { tasks: [{ name: "", agent: "worker", task: "\n\nImport source\nthen review" }] }, defaultOpen: false });
+    expect(summary).not.toContain("tv-body");
+    expect(summary).toContain("Import source");
+    expect(summary).not.toContain("then review");
+    const stepped = render({ name: "task", args: { tasks: [{ name: "", agent: "worker", steps: ["Collect inputs", "Write report"] }] }, defaultOpen: false });
+    expect(stepped).toContain("Collect inputs");
+    expect(stepped).not.toContain("Write report");
+    // A whitespace-only assignment is not work: the first step still briefs the card.
+    const blank = render({ name: "task", args: { tasks: [{ name: "", agent: "worker", task: "  \n\t ", steps: ["Collect inputs"] }] }, defaultOpen: false });
+    expect(blank).toContain("Collect inputs");
+  });
+
+  test("renders two unnamed tasks without sharing a row key", async () => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+    try {
+      await mount(createElement(ToolView, { defaultOpen: true, name: "task", args: { tasks: [
+        { name: "", agent: "worker", task: "First assignment" },
+        { name: "", agent: "worker", task: "Second assignment" },
+      ] } }));
+    } finally {
+      console.error = original;
+    }
+    expect(errors.filter(message => message.includes("same key"))).toEqual([]);
+  });
+
   test("renders eval printed views once and preserves their surrounding text order", () => {
     const html = render({
       name: "eval", args: { language: "py", code: "print(result)" },
@@ -240,5 +406,40 @@ describe("tool renderers across supported OMP releases", () => {
     const job = render({ name: "job", args: { poll: ["a1b2"] }, result: { content: [] } });
     expect(job).toContain("poll a1b2");
     expect(job).not.toContain("tv-out-title");
+  });
+});
+
+describe("task drill-down", () => {
+  beforeEach(installDomGlobals);
+  afterEach(unmountAll);
+  afterAll(restoreDomGlobals);
+
+  test("opens only the agent id the host reports, never an earlier agent holding the requested name", async () => {
+    // Upstream allocates `Refresh-2` when an earlier task in the session already took `Refresh`.
+    const openAgent = mock((_id: string) => undefined);
+    const host = { hasAgent: (id: string) => id === "Refresh" || id === "Refresh-2" || id === "agent", openAgent };
+    const tree = await mount(createElement(ToolView, {
+      defaultOpen: true, name: "task", host,
+      args: { tasks: [{ name: "Refresh", agent: "worker", task: "Import source" }] },
+      result: { content: [], details: { progress: [{ index: 0, id: "Refresh-2", status: "running", description: "Import source" }] } },
+    }));
+    const links = queryAll(tree.container, "tv-agent-link");
+    expect(links).toHaveLength(1);
+    for (const link of links) await click(link);
+    expect(openAgent.mock.calls.map(([id]) => id)).toEqual(["Refresh-2"]);
+
+    // A result or progress record without a host id has no navigation identity, even when an agent
+    // called `agent` exists: the label is plain text, and clicking nothing opens nothing.
+    const anonymous = await mount(createElement(ToolView, {
+      defaultOpen: true, name: "task", host,
+      args: { tasks: [{ name: "Anonymous", agent: "worker", task: "Import source" }] },
+      result: { content: [], details: {
+        results: [{ exitCode: 0, output: "done" }],
+        progress: [{ status: "running", description: "anonymous work" }],
+      } },
+    }));
+    expect(queryAll(anonymous.container, "tv-agent-link")).toHaveLength(0);
+    expect(textOf(anonymous.container)).toContain("agent");
+    expect(openAgent.mock.calls.map(([id]) => id)).toEqual(["Refresh-2"]);
   });
 });
