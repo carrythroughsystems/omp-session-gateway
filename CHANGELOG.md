@@ -6,6 +6,31 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.12.0] — 2026-11-13
+
+This release uses stock OMP v18.20.0 as its engineering baseline. The 4 changelog entries below record the changes since v0.11.0. Historical receipts do not qualify these bytes.
+
+### Changed
+
+- Rewrite the README and documentation for their readers: the usage guide follows the app's
+  current screens, the operations guide puts the one-host path before optional features, and
+  dated records move to labeled tails in each document.
+- Advance the independent host engineering baseline to stock OMP 18.20.0 with
+  measured source and native pins; retain the minimum host and published
+  qualification.
+- Refresh the embedded client and wire dependency to exact OMP 18.20.0 source:
+  bounded guest resync, HTML-form Ask and named task/step results, with local
+  safety patches and older-host rendering retained; show the host's result text
+  for a form Ask without answers, and open a subagent transcript only by the
+  agent id the host reports; recognize its positive counted rewind status in the
+  canary without accepting failed or zero-turn text.
+
+### Fixed
+
+- Correct documented names and paths: the push state file is `push-state.json`, the Windows
+  scheduled task is `OMP Session Gateway`, a custom OMP discovery directory is
+  `~/<PI_CONFIG_DIR>/run/collab-hosts`, and `doctor` runs up to three conditional checks.
+
 ## [v0.11.0] — 2026-11-10
 
 This release uses stock OMP v18.18.0 as its engineering baseline. The 6 changelog entries below record the changes since v0.10.1. Historical receipts do not qualify these bytes.

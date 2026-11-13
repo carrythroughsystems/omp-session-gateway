@@ -2,7 +2,8 @@
 
 
 <!-- release-generate:release-task:start -->
-
+- Qualify and publish v0.12.0 with stock OMP v18.20.0; published v0.11.0 stays current stable.
+- Requalify attention and lifecycle scenarios on the exact signed candidate; historical evidence does not transfer.
 <!-- release-generate:release-task:end -->
 GitHub issues are the active work queue. [Compatibility](COMPATIBILITY.md) and
 [Release status](RELEASE_STATUS.md) record current support and qualification;

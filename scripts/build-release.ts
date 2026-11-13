@@ -8,7 +8,7 @@ import geist from "../apps/web/src/fonts/geist/manifest.json";
 import nerdSymbols from "../apps/web/src/fonts/nerd-symbols/manifest.json";
 import packageManifest from "../package.json";
 
-export const PRODUCT_VERSION = "0.11.0";
+export const PRODUCT_VERSION = "0.12.0";
 const PINNED_BUN_VERSION = packageManifest.packageManager.replace(/^bun@/u, "");
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultReleaseRoot = join(root, "dist", "release");
