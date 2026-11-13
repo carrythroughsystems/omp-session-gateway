@@ -32,6 +32,124 @@ const taggedDoctorChecks = { assets: true, compatibility: true, config: true, da
   serveMapping: true, serviceActive: true, serviceInstalled: true, tailscaleConnected: true,
   identityAllowed: false, pwa: false, sessionHealth: false, securityHeaders: true };
 const doctorState = { loopbackOnly: true, logonTrigger: true, interactivePrincipal: true, logonTriggerScoped: true };
+/** No real credential, provider, device or FreeRDP access, including on non-macOS test hosts. */
+async function withHeadlessRdpRuntime(probe: "connect" | "display-exit" | "no-marker" | "stalled",
+  action: (runtime: WindowsRuntime, starts: Array<{ argv: string[]; driver: unknown; inherited: unknown; stdout: unknown; stderr: unknown; input: string; signals: string[] }>) => Promise<void>): Promise<void> {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const previousDriver = process.env.SDL_VIDEO_DRIVER, previousCanary = process.env.OMP_RDP_TEST_INHERITED;
+  process.env.SDL_VIDEO_DRIVER = "synthetic-inherited-driver"; process.env.OMP_RDP_TEST_INHERITED = "synthetic-inherited-value";
+  Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+  const starts: Parameters<typeof action>[1] = [];
+  const stat = spyOn(filesystem, "lstat").mockImplementation((async () => ({
+    isFile: () => true, isSymbolicLink: () => false, uid: process.getuid?.(), mode: 0o100600,
+  }) as Awaited<ReturnType<typeof filesystem.lstat>>) as typeof filesystem.lstat);
+  const files = spyOn(filesystem, "readFile").mockImplementation((async (path: Parameters<typeof filesystem.readFile>[0]) => {
+    const name = String(path);
+    if (name.endsWith(".vultr-apikey")) return "synthetic-provider-key";
+    if (name.endsWith(".ts-qual-authkey") || name.endsWith(".ts-authkey-qual")) return "tskey-auth-synthetic";
+    if (name.endsWith(".ts-qual-apikey")) return "tskey-api-synthetic";
+    if (name.endsWith(`${epoch}.json`)) return JSON.stringify({ instance: "synthetic-instance", host: "192.0.2.1", password: "synthetic-rdp-stdin-only" });
+    if (name.endsWith(".ps1")) return "param($p)";
+    throw Object.assign(new Error("synthetic missing file"), { code: "ENOENT" });
+  }) as typeof filesystem.readFile);
+  const fetcher = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: string | URL | Request) =>
+    String(url) === "https://api.ipify.org" ? new Response("192.0.2.1") : new Response(JSON.stringify({
+      instances: [], firewall_groups: [], os: [{ id: pins.osId, name: pins.osName }], available_plans: [pins.plan],
+      devices: [], meta: { links: { next: null } },
+    })), { preconnect: globalThis.fetch.preconnect }));
+  const originalTimer = globalThis.setTimeout;
+  const timer = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, ms: number) => {
+    const handle = originalTimer(callback, ms);
+    if (ms === 3_000 && probe === "stalled") queueMicrotask(callback);
+    return handle;
+  }) as typeof setTimeout);
+  const spawn = spyOn(Bun, "spawn").mockImplementation(((argv: string[], options: Record<string, unknown>) => {
+    if (argv[0] === "sdl-freerdp" && argv.some(arg => arg.startsWith("/v:"))) {
+      const environment = options.env as Record<string, unknown> | undefined;
+      const start = { argv, driver: environment?.SDL_VIDEO_DRIVER, inherited: environment?.OMP_RDP_TEST_INHERITED,
+        stdout: options.stdout, stderr: options.stderr, input: "", signals: [] as string[] };
+      starts.push(start);
+      const isProbe = argv.includes("/v:127.0.0.1:9");
+      let resolveExit!: (code: number) => void, close!: () => void;
+      const client = { stdin: { write: (input: string) => { start.input += input; }, end: () => {} }, exitCode: null as number | null,
+        exited: new Promise<number>(resolve => { resolveExit = resolve; }),
+        stderr: new ReadableStream<Uint8Array>({ start(controller) {
+          close = () => controller.close();
+          if (isProbe && probe !== "stalled") {
+            // Chunked marker amid unrelated private bytes; only the marker may affect the verdict.
+            const output = probe === "connect" ? ["synthetic-private-output [freerdp_tcp_con", "nect_timeout]: synthetic-tail"]
+              : [probe === "display-exit" ? "none of the 1 displays has a usable size" : "synthetic-private-output"];
+            for (const chunk of output) controller.enqueue(new TextEncoder().encode(chunk));
+            controller.close();
+          }
+        } }),
+        kill: (signal: string) => { start.signals.push(signal); if (client.exitCode === null) { client.exitCode = 143; if (!isProbe || probe === "stalled") close(); resolveExit(143); } },
+      };
+      if (isProbe && probe !== "stalled") { client.exitCode = 255; resolveExit(255); }
+      return client;
+    }
+    const output = argv.includes("/help") ? "/from-stdin fingerprint:<hash>" : argv.includes("/version")
+      ? `FreeRDP version ${pins.freerdpVersion} (synthetic)` : argv.includes("-c") ? pins.pywinrmVersion
+      : argv[0] === "adb" ? "List of devices attached\nsynthetic-pixel device\n" : JSON.stringify({ exitCode: 0, failure: null,
+        stdout: JSON.stringify({ fingerprint: "a".repeat(64), interactive: true }),
+        teardown: { commandAttempted: true, commandStopped: true, shellAttempted: true, shellClosed: true } });
+    return { stdin: { write: () => {}, end: () => {} }, exitCode: 0, exited: Promise.resolve(0), kill: () => {},
+      stdout: new Response(output).body, stderr: new Response("").body };
+  }) as typeof Bun.spawn);
+  try { await action(await windowsRuntime.createWindowsRuntime(), starts); }
+  finally {
+    spawn.mockRestore(); timer.mockRestore(); fetcher.mockRestore(); files.mockRestore(); stat.mockRestore();
+    Object.defineProperty(process, "platform", platform);
+    if (previousDriver === undefined) delete process.env.SDL_VIDEO_DRIVER; else process.env.SDL_VIDEO_DRIVER = previousDriver;
+    if (previousCanary === undefined) delete process.env.OMP_RDP_TEST_INHERITED; else process.env.OMP_RDP_TEST_INHERITED = previousCanary;
+  }
+}
+test("headless RDP session spawn overrides only the video driver and keeps the password on stdin", async () => {
+  await withHeadlessRdpRuntime("connect", async (runtime, starts) => {
+    await runtime.rdp({ epoch, identity, assertEffect: () => {}, beforeEffect: async () => {}, mutation: async (_key, action) => action() });
+    expect(starts).toHaveLength(1);
+    const start = starts[0]!;
+    expect(start.driver).toBe("dummy"); expect(start.inherited).toBe("synthetic-inherited-value");
+    expect(start.stdout).toBe("ignore"); expect(start.stderr).toBe("ignore");
+    expect(start.input).toBe("synthetic-rdp-stdin-only\n");
+    expect(start.argv.join(" ")).not.toContain("synthetic-rdp-stdin-only");
+    expect(start.argv).toContain("/from-stdin:force"); expect(start.argv).toContain(`/cert:fingerprint:sha256:${"a".repeat(64)}`);
+  });
+});
+test.each(["connect", "display-exit", "no-marker", "stalled"] as const)("headless RDP preflight %s requires three bounded local connection attempts", async probe => {
+  await withHeadlessRdpRuntime(probe, async (runtime, starts) => {
+    const outcome = await runtime.admit({}).catch(error => error);
+    if (probe === "connect") {
+      expect(starts).toHaveLength(3); expect(outcome.admitted).toBe(true);
+    } else {
+      expect(outcome).toBeInstanceOf(QualificationFailure);
+      expect(outcome.message).toBe("FreeRDP startup probe did not reach TCP connect");
+      expect(outcome.evidence).toMatchObject({ lane: "windows", step: "preflight", reason: "helper_failed", class: "harness", operation: "read_only" });
+      expect(JSON.stringify(privateQualificationFailureDiagnostic(outcome))).not.toContain("synthetic-private-output");
+      expect(starts).toHaveLength(1);
+    }
+    for (const start of starts) {
+      expect(start.argv).toContain("/v:127.0.0.1:9"); expect(start.driver).toBe("dummy");
+      expect(start.inherited).toBe("synthetic-inherited-value"); expect(start.stdout).toBe("ignore");
+      if (probe === "stalled") expect(start.signals).toEqual(["SIGTERM"]);
+    }
+  });
+});
+test("headless RDP early exit retains its typed phase through independent cleanup", async () => {
+  const f = fixture();
+  f.runtime.rdp = async context => windowsRuntime.settleWindowsRdp({
+    stdin: { write: () => {}, end: () => {} }, exitCode: 255, exited: Promise.resolve(255), kill: () => {},
+  }, "synthetic-stdin-only", async () => {}, context.execution);
+  const failure = await f.run().catch(error => error);
+  expect(failure).toBeInstanceOf(QualificationFailure);
+  expect(failure.evidence).toMatchObject({ lane: "windows", step: "toolchain_staged", reason: "helper_failed",
+    class: "harness", operation: "confirmed", observations: { exitCode: 255 } });
+  expect(failure.message).toBe("RDP client exited before interactive logon (status 255)");
+  expect(f.instances).toEqual([]); expect(f.firewalls).toEqual([]);
+  expect(windowsNeedsCleanup(f.progress)).toBe(false);
+  expect(qualificationRetryEligible({ failures: normalizeQualificationFailures(failure), timings: { attemptMs: 0, cleanupMs: 0 },
+    containment: { cleanupComplete: true, proven: true, unresolvedMutation: false } }, true)).toBe(false);
+});
 test("an authenticated transport error resets both the stability count and window", async () => {
   let now = 0; let failed = false;
   const uninterrupted: number[] = [];

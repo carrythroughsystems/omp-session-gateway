@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as abortableSleep } from "node:timers/promises";
 import pins from "./windows-qualification-pins.json";
 import { assertWindowsAllocation, assertWindowsExecution, cleanupWindows, preflightWindows, runWindows, windowsCampaignLabel, windowsContainmentExecution, windowsFailure, windowsNeedsCleanup, windowsRemaining } from "./windows-stable-qualification.ts";
 import type { WindowsAdmission, WindowsArtifact, WindowsContext, WindowsExecutionContext, WindowsFirewall, WindowsIdentity, WindowsInstance, WindowsLaneInput, WindowsPreflightInput, WindowsPrincipal, WindowsRuntime, WindowsTransportProbe } from "./windows-stable-qualification.ts";
@@ -420,10 +421,16 @@ export function windowsGuestAccessAvailable(value: unknown): boolean {
 }
 
 export async function pollWindows(action: () => Promise<boolean>, ms: number, name: string, execution?: WindowsExecutionContext,
-  clock: Pick<WindowsRuntime, "now" | "sleep"> = { now: performance.now, sleep: Bun.sleep }): Promise<void> {
+  clock: { now: () => number; sleep: (ms: number, signal?: AbortSignal) => Promise<void> } = {
+    now: performance.now, sleep: (ms, signal) => signal === undefined ? Bun.sleep(ms) : abortableSleep(ms, undefined, { signal }),
+  }, signal?: AbortSignal): Promise<void> {
   const started = clock.now(), deadline = started + ms;
   const remaining = () => {
-    try { return windowsRemaining(started, deadline, clock.now(), execution); }
+    try {
+      const budget = windowsRemaining(started, deadline, clock.now(), execution);
+      signal?.throwIfAborted();
+      return budget;
+    }
     catch (error) {
       if (error instanceof QualificationFailure && error.evidence.reason === "deadline_exceeded") error.message = `${name} timed out`;
       throw error;
@@ -439,7 +446,7 @@ export async function pollWindows(action: () => Promise<boolean>, ms: number, na
     }
     const budget = remaining();
     if (succeeded) return;
-    await clock.sleep(Math.min(5_000, budget));
+    await clock.sleep(Math.min(5_000, budget), signal);
   }
 }
 
@@ -449,11 +456,19 @@ export async function settleWindowsRdp(child: {
   readonly exitCode: number | null;
   kill(signal: "SIGTERM" | "SIGKILL"): unknown;
   readonly exited: Promise<number>;
-}, input: string, observe: () => Promise<void>, execution?: WindowsExecutionContext): Promise<void> {
+}, input: string, observe: (signal: AbortSignal) => Promise<void>, execution?: WindowsExecutionContext): Promise<void> {
   let grace: ReturnType<typeof setTimeout> | undefined, deadline: ReturnType<typeof setTimeout> | undefined, stopped = false;
+  let exitedBeforeLogon: number | undefined, observed = false;
+  const observation = new AbortController();
+  const exited = child.exited.then(code => {
+    if (!stopped && !observed) { exitedBeforeLogon = code; observation.abort(); }
+    return code;
+  });
   const terminate = () => {
     if (stopped) return;
     stopped = true;
+    observation.abort();
+    if (child.exitCode !== null) return;
     grace = setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 5_000);
     child.kill("SIGTERM");
   };
@@ -466,13 +481,87 @@ export async function settleWindowsRdp(child: {
     }
     await child.stdin.write(input); assertWindowsExecution(execution);
     await child.stdin.end(); assertWindowsExecution(execution);
-    await observe();
+    observation.signal.throwIfAborted();
+    await observe(observation.signal);
+    assertWindowsExecution(execution);
+    observation.signal.throwIfAborted();
+    observed = true;
+  } catch (error) {
+    assertWindowsExecution(execution);
+    if (exitedBeforeLogon !== undefined) {
+      // A client outcome is known, but any guest-side effects still require the lane's cleanup sweep.
+      const failure = windowsFailure("helper_failed", "connection", "confirmed",
+        { exitCode: Math.max(0, Math.min(255, exitedBeforeLogon)) }, execution);
+      failure.message = `RDP client exited before interactive logon (status ${exitedBeforeLogon})`;
+      throw failure;
+    }
+    throw error;
   } finally {
     try {
-      try { terminate(); } finally { await child.exited; }
+      try { terminate(); } finally { await exited; }
     } finally {
       clearTimeout(grace); clearTimeout(deadline);
       execution?.signal.removeEventListener("abort", terminate);
+    }
+  }
+}
+
+/** Drain every byte, retaining only the suffix needed for one measured, pinned-client marker. */
+async function rdpConnectionAttempt(stream: ReadableStream<Uint8Array>, observed: () => void): Promise<void> {
+  const marker = "[freerdp_tcp_connect_timeout]:", reader = stream.getReader(), decoder = new TextDecoder();
+  let suffix = "", seen = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (seen) continue;
+      const text = suffix + decoder.decode(value, { stream: true });
+      if (text.includes(marker)) { seen = true; suffix = ""; observed(); }
+      else suffix = text.slice(-(marker.length - 1));
+    }
+  } finally { reader.releaseLock(); }
+}
+
+/** Local prerequisite only: no real account, certificate, guest, listener or persistent state. */
+async function preflightWindowsRdp(execution?: WindowsExecutionContext): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const now = performance.now();
+    const budget = windowsRemaining(now, now + 3_000, now, execution, "not_started");
+    const deadline = now + budget;
+    const child = Bun.spawn(["sdl-freerdp", "/v:127.0.0.1:9", "/u:omp-rdp-preflight", "/from-stdin:force",
+      `/cert:fingerprint:sha256:${"0".repeat(64)}`, "/size:800x600", "/log-level:WARN"],
+    { env: { ...process.env, SDL_VIDEO_DRIVER: "dummy" }, stdin: "pipe", stdout: "ignore", stderr: "pipe" });
+    let stopped = false, connected = false, grace: ReturnType<typeof setTimeout> | undefined;
+    const terminate = () => {
+      if (stopped) return;
+      stopped = true;
+      if (child.exitCode !== null) return;
+      grace = setTimeout(() => { if (child.exitCode === null) child.kill("SIGKILL"); }, 1_000);
+      child.kill("SIGTERM");
+    };
+    const timer = setTimeout(terminate, budget);
+    execution?.signal.addEventListener("abort", terminate, { once: true });
+    const drained = rdpConnectionAttempt(child.stderr, () => {
+      if (!stopped && performance.now() < deadline && !execution?.signal.aborted) connected = true;
+      terminate();
+    });
+    try {
+      assertWindowsExecution(execution);
+      child.stdin.write("synthetic-not-a-credential\n"); child.stdin.end();
+      await Promise.all([child.exited, drained]);
+      assertWindowsExecution(execution);
+      if (!connected) throw new Error("startup marker missing");
+    } catch {
+      assertWindowsExecution(execution);
+      const failure = windowsFailure("helper_failed", "preflight", "read_only", {}, execution);
+      failure.message = "FreeRDP startup probe did not reach TCP connect";
+      throw failure;
+    } finally {
+      try { terminate(); } finally {
+        await child.exited; await drained.catch(() => {});
+        clearTimeout(timer); clearTimeout(grace);
+        execution?.signal.removeEventListener("abort", terminate);
+      }
     }
   }
 }
@@ -958,6 +1047,7 @@ if ($exists) {
       if (!rdpHelp.includes("/from-stdin") || !rdpHelp.includes("fingerprint:<hash>")) throw new Error("FreeRDP pin/stdin support missing");
       const rdpVersion = await hostCommand(["sdl-freerdp", "/version"]);
       if (!rdpVersion.includes(`version ${pins.freerdpVersion} `)) throw new Error("FreeRDP version mismatch");
+      await preflightWindowsRdp(execution);
       await requireSingleDevice(); // Read-only device enumeration; navigation is behind pixel().
       const tailnet = await request<{ devices: unknown[] }>("https://api.tailscale.com/api/v2/tailnet/-/devices", tsHeaders, "GET", undefined, execution);
       if (!tailnet || !Array.isArray(tailnet.devices)) throw new Error("qualification tailnet admission failed");
@@ -1121,12 +1211,18 @@ if ($exists) {
       if (typeof cert.fingerprint !== "string" || !SHA.test(cert.fingerprint)) throw new Error("RDP certificate SHA-256 unavailable");
       await context.beforeEffect();
       context.assertEffect();
-      const child = Bun.spawn(["sdl-freerdp", `/v:${access.host}`, `/u:${credential.account}`, "/from-stdin:force", `/cert:fingerprint:sha256:${cert.fingerprint}`, "/size:800x600", "/log-level:OFF"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+      const child = Bun.spawn(["sdl-freerdp", `/v:${access.host}`, `/u:${credential.account}`, "/from-stdin:force", `/cert:fingerprint:sha256:${cert.fingerprint}`, "/size:800x600", "/log-level:OFF"],
+        { env: { ...process.env, SDL_VIDEO_DRIVER: "dummy" }, stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       // A new account's first logon builds its profile before Explorer starts, which the provider's Administrator never waits for.
       const session = principal === "administrator" ? {} : { account: credential.account };
-      await settleWindowsRdp(child, `${credential.password}\n`, () => pollWindows(
-        async () => (await ps(context, "interactive", session)).interactive === true, principal === "administrator" ? 120_000 : 240_000,
-        "certificate-pinned interactive RDP", context.execution ?? execution), context.execution ?? execution);
+      const timeoutMs = principal === "administrator" ? 120_000 : 240_000;
+      const owner = context.execution ?? execution;
+      await settleWindowsRdp(child, `${credential.password}\n`, signal => {
+        const parent = owner ?? windowsContainmentExecution(timeoutMs);
+        const observation = { ...parent, signal: AbortSignal.any([parent.signal, signal]) };
+        return pollWindows(async () => (await ps({ ...context, execution: observation }, "interactive", session)).interactive === true,
+          timeoutMs, "certificate-pinned interactive RDP", observation, undefined, signal);
+      }, owner);
     },
     async pixel(context) {
       const access = await loadAccess(context.epoch);
