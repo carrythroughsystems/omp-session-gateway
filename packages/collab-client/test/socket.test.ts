@@ -657,6 +657,134 @@ describe("CollabSocket browser lifecycle recovery", () => {
     }
   });
 
+  test("retries an unwelcomed resync hello within the rejoin budget and then ends", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(2);
+      // MAX_AUTO_REJOINS (3) hellos inside AUTO_REJOIN_WINDOW_MS, each awaited for WELCOME_TIMEOUT_MS (30 s).
+      for (let sent = 3; sent <= 4; sent += 1) {
+        expect(timers.pendingDelays()).toEqual([30_000]);
+        timers.runNext();
+        await socket.waitForSent(sent);
+        expect(client.getSnapshot().phase).toBe("reconnecting");
+      }
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      timers.runNext();
+      expect(client.getSnapshot().phase).toBe("ended");
+      expect(client.getSnapshot().endedReason).toBe("timed out waiting for the host's welcome");
+      expect(timers.pendingDelays()).toEqual([]);
+      expect(socket.sent).toHaveLength(1 + MAX_AUTO_REJOINS);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
+  test("keeps a late non-resync error after a resync as a notice while the rejoin awaits its welcome", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(2);
+      // The pinned host still delivers asynchronous replies to frames sent before the shed on this
+      // transport (upstream host.ts `prompt failed: …`); they must not end the rejoin.
+      client.applyFrameForTest({ t: "error", message: "prompt failed: Error: provider unavailable" });
+      expect(client.getSnapshot().phase).toBe("reconnecting");
+      expect(client.getSnapshot().endedReason).toBeNull();
+      expect(client.getSnapshot().notices.map(notice => notice.message)).toContain("prompt failed: Error: provider unavailable");
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      expect(timers.pendingDelays()).toEqual([]);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
+  test("sends an in-flight dialog response before the rejoin hello and never replays it", async () => {
+    const key = await importRoomKey(new Uint8Array(32));
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "ui-request", request: { reqId: 42, kind: "select", title: "Allow?", options: ["Yes", "No"], approval: true } });
+      client.sendUiResponse(42, "Yes");
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      // The response is still being sealed when the resync arrives.
+      expect(socket.sent).toHaveLength(1);
+      await socket.waitForSent(3);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "ui-response", "hello"]);
+      expect(client.getSnapshot().uiResponsePending).toBeFalse();
+      expect(client.getSnapshot().uiRequest).toBeNull();
+      // The host answers the unregistered peer's response with another resync; the armed rejoin ignores it.
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      // Sends are sealed in order, so a replayed response would precede this sentinel.
+      client.sendAbort();
+      await socket.waitForSent(4);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "ui-response", "hello", "abort"]);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("drops an in-flight relay probe when a shed guest rejoins on the same transport", async () => {
+    const timers = installFakeTimers();
+    const client = new GuestClient(TEST_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      client.applyFrameForTest({ t: "gateway-health-pong", seq: 0 });
+      client.remeasureRelay();
+      await socket.waitForSent(2);
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      timers.runNext();
+      await socket.waitForSent(3);
+      expect(client.getSnapshot().relayHealth.state).toBe("degraded");
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      client.applyFrameForTest({ t: "error", message: "shed", resync: true });
+      await socket.waitForSent(4);
+      expect(timers.pendingDelays()).toEqual([30_000]);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
+      expect(client.getSnapshot().relayHealth.state).toBe("healthy");
+      expect(timers.pendingDelays()).toEqual([10_000]);
+      // The miss counted before the shed does not carry over: the next missed probe only degrades.
+      timers.runNext();
+      await socket.waitForSent(5);
+      expect(timers.pendingDelays()).toEqual([3_000]);
+      timers.runNext();
+      await socket.waitForSent(6);
+      expect(client.getSnapshot().relayHealth.state).toBe("degraded");
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    } finally {
+      client.close();
+      timers.restore();
+    }
+  });
+
   test.each(["empty welcome", "final chunk", "entry count"] as const)("resends a pending UI response after reconnect completes via %s", async completion => {
     const key = await importRoomKey(new Uint8Array(32));
     const client = new GuestClient(TEST_CONTROL_LINK, "test guest");

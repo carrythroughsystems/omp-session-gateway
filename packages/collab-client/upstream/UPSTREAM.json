@@ -224,7 +224,7 @@
       },
       {
         "id": "bounded-room-recovery",
-        "purpose": "Bound relay-room replacement to six transport retries; adapt upstream's separate three-rejoin budget to the gateway's per-transport welcome state.",
+        "purpose": "Bound relay-room replacement to six transport retries; adapt upstream's separate three-rejoin budget to the gateway's per-transport welcome state; an in-place resync rejoin keeps upstream's once-welcomed error handling, so a late reply to a frame sent before the shed stays a notice.",
         "files": [
           "src/lib/client.ts",
           "src/lib/socket.ts"
@@ -241,6 +241,14 @@
           {
             "file": "packages/collab-client/test/socket.test.ts",
             "case": "retries a post-reconnect missing welcome through the same bounded rejoin budget"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "retries an unwelcomed resync hello within the rejoin budget and then ends"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "keeps a late non-resync error after a resync as a notice while the rejoin awaits its welcome"
           }
         ],
         "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
@@ -264,7 +272,7 @@
       },
       {
         "id": "health-and-response-ack",
-        "purpose": "Retain metadata-free probes, encrypted health frames, object sealing and transport-reconnect response acknowledgements; clear shed-peer responses on upstream resync.",
+        "purpose": "Retain metadata-free probes, encrypted health frames, object sealing and transport-reconnect response acknowledgements; on upstream resync, clear shed-peer responses and drop any in-flight relay probe.",
         "files": [
           "src/lib/browser-recovery.ts",
           "src/lib/client.ts",
@@ -283,6 +291,14 @@
           {
             "file": "packages/collab-client/test/socket.test.ts",
             "case": "clears a shed approval response instead of replaying a no-longer-held dialog"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "sends an in-flight dialog response before the rejoin hello and never replays it"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "drops an in-flight relay probe when a shed guest rejoins on the same transport"
           },
           {
             "file": "apps/web/e2e/launch.e2e.ts",

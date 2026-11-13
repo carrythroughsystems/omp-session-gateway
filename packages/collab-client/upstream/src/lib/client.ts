@@ -34,7 +34,6 @@ import { CollabSocket, type GatewayHostFrame } from "./socket";
 
 export type { ConnectionPhase, PathHealth, PathHealthState } from "../embed-contract";
 
-
 export interface ActiveTool {
 	toolCallId: string;
 	toolName: string;
@@ -382,13 +381,19 @@ export class GuestClient {
 		this.#commit();
 	}
 
-	/** Rejoin a shed guest within upstream's snapshot budget, without replacing the transport. */
+	/**
+	 * Say hello again after the host dropped this guest, within the auto-rejoin
+	 * budget. A welcome that does not follow retries through the same budget. Once
+	 * the budget is spent the session ends, leaving the rejoin to the user.
+	 */
 	#rejoin(message: string): void {
 		if (!takeAutoRejoin(this.#autoRejoins)) {
 			this.#end(message);
 			return;
 		}
 		this.#clearSnapshotProgressTimer();
+		// A probe sent before the shed must not judge the relay while this hello awaits its welcome.
+		this.#clearRelayProbe();
 		this.#pendingSnapshot = null;
 		// A shed peer is no longer a dialog recipient. Do not replay an old answer;
 		// the host re-poses any still-pending requests with its new snapshot.
@@ -405,7 +410,7 @@ export class GuestClient {
 		this.#commit();
 	}
 
-	/** A post-join hello the host never welcomes retries through the same rejoin budget. */
+	/** A post-join hello the host never welcomes retries through the rejoin budget. */
 	#armRejoinTimer(): void {
 		this.#clearWelcomeTimer();
 		this.#welcomeTimer = setTimeout(() => {
@@ -648,10 +653,11 @@ export class GuestClient {
 				return; // #end already committed
 			case "error":
 				if (frame.resync) {
-					// A hello awaiting welcome is already covered by its timer.
+					// The host dropped this guest but the relay link is intact. A hello
+					// still awaiting its welcome is retried by the welcome timer.
 					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
 					this.#rejoin(frame.message);
-					return;
+					return; // #rejoin or #end already committed
 				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our
@@ -934,6 +940,10 @@ export class GuestClient {
 			liveEpoch: this.#liveEpoch,
 			endedReason: this.#endedReason,
 			header: this.#header,
+			// Publish the cached array: identical reference until an
+			// entry-mutating frame replaces it, so non-entry frames
+			// (streaming updates, state, bus) don't invalidate entry-identity
+			// consumers per token.
 			entries: this.#publishedEntries,
 			state: this.#state,
 			agents: this.#agents,
