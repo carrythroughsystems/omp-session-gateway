@@ -250,7 +250,11 @@ function htmlText(fragment: string): string {
 	return normalizeWs(decoded);
 }
 
-/** Coarse outline only: no upstream form HTML is mounted or executed in the browser. */
+/**
+ * Coarse outline of a (possibly still streaming) form without a DOM: fieldset
+ * legends, else the captions and labels before its first control, plus how
+ * many distinct named controls it has.
+ */
 function formOutline(html: string): { headings: string[]; fields: number } {
 	const names = new Set<string>();
 	for (const match of html.matchAll(/<(input|select|textarea)\b([^>]*)>?/gi)) {
@@ -271,6 +275,7 @@ function formOutline(html: string): { headings: string[]; fields: number } {
 	return { headings: caption ? [caption] : [], fields: names.size };
 }
 
+/** Answers from `result.details`; null when the result carries none (error, cancel, older sessions). */
 function formAnswersOf(details: Record<string, unknown> | null): FormAnswer[] | null {
 	if (!details || !Array.isArray(details.answers)) return null;
 	const out: FormAnswer[] = [];
@@ -281,7 +286,7 @@ function formAnswersOf(details: Record<string, unknown> | null): FormAnswer[] | 
 		const answer = str(entry.answer);
 		if (question !== null && answer !== null) out.push({ name: name ?? "", question, answer });
 	}
-	return out.length > 0 || details.answers.length === 0 ? out : null;
+	return out.length > 0 ? out : null;
 }
 
 /** Valid selected-option notes from persisted details; ignore malformed entries. */

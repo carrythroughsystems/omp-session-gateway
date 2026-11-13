@@ -108,7 +108,7 @@
     "active": [
       {
         "id": "legacy-ask-and-task",
-        "purpose": "Adopt HTML-form Ask and named task/steps rendering while retaining question cards and task id/assignment for older supported hosts; never mount supplied form HTML.",
+        "purpose": "Adopt HTML-form Ask and named task/steps rendering while retaining question cards and task id/assignment for older supported hosts; never mount supplied form HTML; show the host's result text when a form records no answers; label a task summary by its first non-empty field.",
         "files": [
           "src/tool-render/tools/ask.tsx",
           "src/tool-render/tools/task.tsx"
@@ -125,10 +125,33 @@
           {
             "file": "packages/collab-client/test/tool-render.test.ts",
             "case": "renders named tasks and ordered steps"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "shows the host's result text when a form ask records no answers"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "summarizes a task by its first non-empty label"
           }
         ],
         "upstreamStatus": "upstream now renders current HTML forms and task fields only; older hosts remain supported by the gateway",
         "removeWhen": "The supported host floor no longer includes question-card Ask or legacy task fields."
+      },
+      {
+        "id": "task-drilldown-by-agent-id",
+        "purpose": "Link task cards to subagent transcripts only through the agent ids the host reports in progress and results; a requested task name or id can name an earlier agent.",
+        "files": [
+          "src/tool-render/tools/task.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "opens only the agent id the host reports, never an earlier agent holding the requested name"
+          }
+        ],
+        "upstreamStatus": "upstream 18.18.0 and 18.20.0 link the requested task name or id, which upstream allocates as Name-2 when an earlier agent holds Name",
+        "removeWhen": "Upstream links task cards only by host-reported agent ids."
       },
       {
         "id": "safe-markdown-links",

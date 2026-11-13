@@ -10,13 +10,15 @@ const MISSING_YIELD_PREFIX = "SYSTEM WARNING: Subagent exited without calling yi
 interface TaskItemView {
 	id: string | null;
 	description: string | null;
+	/** Single-prompt instructions; null for a stepped spawn. */
 	assignment: string | null;
 	agent: string | null;
+	/** Ordered stages sent one prompt at a time (`task.steps`); empty for a `task` spawn. */
 	steps: string[];
 	isolated: boolean;
 }
 
-/** Current name/task/steps fields, with older supported host fields kept as fallbacks. */
+/** Read one item; args stream in token by token, so non-string steps (still partial) are skipped. */
 function taskItem(entry: Record<string, unknown>, agent: string | null): TaskItemView {
 	return {
 		id: str(entry.name) ?? str(entry.id),
@@ -40,6 +42,13 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 	}
 	const flat = taskItem(args, str(args.agent));
 	return flat.id || flat.description || flat.assignment || flat.steps.length > 0 ? [flat] : [];
+}
+
+/** First non-blank line of the work: the `task`, else the first step. */
+function taskBrief(item: TaskItemView): string | null {
+	const text = item.assignment ?? item.steps[0] ?? "";
+	const line = text.split("\n").find(l => l.trim() !== "");
+	return line ? normalizeWs(line) : null;
 }
 
 /** "Anna.Bob" nesting → "Anna>Bob" breadcrumb (mirrors the TUI's formatTaskId). */
@@ -70,10 +79,11 @@ function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok"
 function Summary({ args }: ToolRenderProps): ReactNode {
 	const resume = str(args.resume);
 	const tasks = taskItems(args);
+	// One badge when every spawn runs the same agent; mixed batches badge each row in the body.
 	const agents = new Set(tasks.map(t => t.agent));
 	const agent = agents.size === 1 ? tasks[0]?.agent : str(args.agent);
 	const first = tasks.length > 0 ? tasks[0] : null;
-	const label = first ? (first.description ?? first.id ?? first.assignment ?? first.steps[0]) : null;
+	const label = first ? first.description || first.id || taskBrief(first) : null;
 	return (
 		<>
 			{agent && <Badge tone="accent">{agent}</Badge>}
@@ -223,13 +233,9 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 						<div key={t.id ?? i}>
 							<Row
 								k={
-									t.id ? (
-										<AgentLink id={t.id} host={host}>
-											{taskIdLabel(t.id)}
-										</AgentLink>
-									) : (
-										<Badge tone="accent">{`#${i + 1}`}</Badge>
-									)
+									// A requested name is not an agent id: upstream allocates `Name-2` once the name is
+									// taken, so only progress and result rows, which carry the host's id, link.
+									<Badge tone="accent">{t.id ? taskIdLabel(t.id) : `#${i + 1}`}</Badge>
 								}
 							>
 								{t.agent && <Badge>{t.agent}</Badge>}{" "}
@@ -239,7 +245,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 								{t.isolated && <Badge>isolated</Badge>}{" "}
 								{t.description && <span>{truncate(normalizeWs(t.description), 120)}</span>}
 							</Row>
-							{t.assignment && <Output text={t.assignment} maxLines={6} title="assignment" />}
+							{t.assignment && <Output text={t.assignment} maxLines={6} title="task" />}
 							{t.steps.map((step, n) => (
 								<Output key={n} text={step} maxLines={4} title={`step ${n + 1}/${t.steps.length}`} />
 							))}

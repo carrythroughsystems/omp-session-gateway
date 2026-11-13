@@ -95,11 +95,15 @@ The shell binds and clears its holder on disposal; no draft enters storage or ga
 
 The 18.20.0 refresh adds upstream's same-transport resync rejoin (three automatic
 rejoins per five minutes), a bounded post-join welcome retry, HTML-form Ask results
-and named task/step rendering. Resync clears the shed peer's old dialog response;
-ordinary transport reconnect still retains it until acknowledgement. Form HTML is
-reduced to text outlines, never mounted. Older question cards and task fields remain
-supported by a named local patch. `socket.test.ts` and `tool-render.test.ts` cover
-these differences; all seven helper blobs are unchanged from the previous import.
+and named task/step rendering. Resync clears the shed peer's old dialog response
+and any in-flight relay probe; ordinary transport reconnect still retains the
+response until acknowledgement. Form HTML is reduced to text outlines, never
+mounted, and a form result without answers shows the host's result text. Task cards
+open a subagent transcript only by the agent id the host reports in progress or
+results, because upstream allocates `Name-2` when a requested name is taken. Older
+question cards and task fields remain supported by a named local patch.
+`socket.test.ts` and `tool-render.test.ts` cover these differences; all seven helper
+blobs are unchanged from the previous import.
 
 The preceding 18.18.0 refresh adopted pi-wire's shared envelope functions, the pure byte-buffer helper,
 upstream wait-list rendering with a small older-singleton/timeout/empty adapter, job-intent labels
