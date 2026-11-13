@@ -960,18 +960,22 @@ The host/relay changes isolate an overloaded guest rather than ending sharing
 and send the additive `error.resync` marker; the client must re-hello with a
 bounded retry budget. Optional `select.approval` metadata marks a permission
 wait without a new response shape. Ask rendering changes from question cards
-to HTML-form results, and task rendering consumes name/agent/task/steps. These
-require a separate reviewed client refresh and its patch/provenance proofs.
+to HTML-form results, and task rendering consumes name/agent/task/steps. The
+embedded client follows them in its own reviewed refresh, committed separately
+with patch and provenance records in `packages/collab-client/upstream/UPSTREAM.json`.
 Extension dialog budgets, pre-shutdown hooks, transcript attachment ordering,
 CLI-guest lifecycle and Tern TSP changes do not add gateway registry fields.
 
 Upstream `7027a619a41c1eccdae6a5f07de91c43e2a487e3` changes the successful
 rewind status from `Rewound to selected point` to `Rewound N turns` when turns
-were dropped. v18.19.0 and v18.20.0 contain that change; the gateway's exact
-old-text canary matcher does not. Correcting that matcher with deterministic
-tests is not a green Linux lifecycle receipt. No new live canary, candidate,
-qualification or installed-byte smoke is claimed, and published v0.11.0 stays
-bound to its recorded v18.18.0 qualification.
+were dropped. v18.19.0 and v18.20.0 contain that change, which is why the canary
+failed at `branch-rewind` on Linux (#343). The matcher now accepts the old text and
+the counted singular and plural forms, and still rejects zero, malformed, failed and
+undone statuses. The pull-request canary at `6bf0013f` (run 43386041824), which
+installed npm `latest` (18.20.0), passed every Linux stage and every supported
+Windows stage; a release request runs the canary pinned to its exact version. No
+candidate, qualification or installed-byte smoke is claimed, and published v0.11.0
+stays bound to its recorded v18.18.0 qualification.
 
 ---
 
