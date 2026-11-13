@@ -137,8 +137,9 @@ baseline procedure. That refresh handles resync, HTML-form Ask and named
 task/step results, while retaining older supported host rendering and its local
 View, acknowledgement and recovery protections. The canary rewind matcher now
 recognizes upstream's positive `Rewound N turns` status as well as the old
-status; the pull-request canary that installed npm `latest` (18.20.0) passed on
-Linux and Windows, and a release request still runs it pinned to its exact
+status; the pull-request canary that installed npm `latest` (18.20.0) passed
+every Linux stage and every supported Windows stage, with `branch-rewind` among
+the stages Windows skips, and a release request still runs it pinned to its exact
 version. Neither qualifies a release. The published matrix below is unchanged.
 
 v18.18.0 (`b5a6b2f7e5b6606b6562e678ead83f21738f34a0`, tree

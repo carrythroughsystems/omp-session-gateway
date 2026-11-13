@@ -6,8 +6,9 @@ The host source pin and, in separate commits, the embedded browser client
 advance to `c308970263ae13744ea15ab67302e3dac840e266`
 (tree `ba890953dd69eb4bf73bb7233bbe50ccfacd6912`). This is source compatibility
 work only. The canary now recognizes upstream's counted rewind status; the
-pull-request canary that installed npm `latest` (18.20.0) passed on Linux and
-Windows. A release request still runs the canary pinned to its exact version.
+pull-request canary that installed npm `latest` (18.20.0) passed every Linux
+stage and every supported Windows stage, with `branch-rewind` among the stages
+Windows skips. A release request still runs the canary pinned to its exact version.
 No candidate, qualification, signed publication or installed-byte smoke is
 recorded by this update. Published v0.11.0 and the generated evidence below
 remain unchanged.
