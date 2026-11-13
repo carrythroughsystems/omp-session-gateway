@@ -11,7 +11,7 @@ The gateway requires stock mainline OMP `>= 18.1.20` with `collab.autoStart` alo
 A **View** or **Control** link is a bearer secret, called a capability in the contracts. On each poll the gateway reads metadata including `generation` (OMP's counter that changes when a session is replaced, so a stale card cannot open a newer session), and resolves an exact generation and mode (**View** or **Control**) only on launch without storing capabilities.
 
 <!-- release-generate:campaign:start -->
-The v0.11.0 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
+The v0.11.0 qualification stays bound to its recorded candidate and devices. The v0.12.0 campaign must pass these scenarios again on its exact signed bytes before its matrix is qualified. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
 ### Stock OMP semantics
