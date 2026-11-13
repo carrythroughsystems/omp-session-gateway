@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ToolView, type ToolViewProps } from "../upstream/src/tool-render/ToolView";
-import { click, installDomGlobals, mount, queryAll, restoreDomGlobals, unmountAll } from "./react-dom-harness";
+import { click, installDomGlobals, mount, queryAll, restoreDomGlobals, textOf, unmountAll } from "./react-dom-harness";
 
 const render = (props: ToolViewProps): string => renderToStaticMarkup(createElement(ToolView, { defaultOpen: true, ...props }));
 
@@ -192,6 +192,24 @@ describe("tool renderers across supported OMP releases", () => {
     const stepped = render({ name: "task", args: { tasks: [{ name: "", agent: "worker", steps: ["Collect inputs", "Write report"] }] }, defaultOpen: false });
     expect(stepped).toContain("Collect inputs");
     expect(stepped).not.toContain("Write report");
+    // A whitespace-only assignment is not work: the first step still briefs the card.
+    const blank = render({ name: "task", args: { tasks: [{ name: "", agent: "worker", task: "  \n\t ", steps: ["Collect inputs"] }] }, defaultOpen: false });
+    expect(blank).toContain("Collect inputs");
+  });
+
+  test("renders two unnamed tasks without sharing a row key", async () => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+    try {
+      await mount(createElement(ToolView, { defaultOpen: true, name: "task", args: { tasks: [
+        { name: "", agent: "worker", task: "First assignment" },
+        { name: "", agent: "worker", task: "Second assignment" },
+      ] } }));
+    } finally {
+      console.error = original;
+    }
+    expect(errors.filter(message => message.includes("same key"))).toEqual([]);
   });
 
   test("renders eval printed views once and preserves their surrounding text order", () => {
@@ -399,7 +417,7 @@ describe("task drill-down", () => {
   test("opens only the agent id the host reports, never an earlier agent holding the requested name", async () => {
     // Upstream allocates `Refresh-2` when an earlier task in the session already took `Refresh`.
     const openAgent = mock((_id: string) => undefined);
-    const host = { hasAgent: (id: string) => id === "Refresh" || id === "Refresh-2", openAgent };
+    const host = { hasAgent: (id: string) => id === "Refresh" || id === "Refresh-2" || id === "agent", openAgent };
     const tree = await mount(createElement(ToolView, {
       defaultOpen: true, name: "task", host,
       args: { tasks: [{ name: "Refresh", agent: "worker", task: "Import source" }] },
@@ -408,6 +426,20 @@ describe("task drill-down", () => {
     const links = queryAll(tree.container, "tv-agent-link");
     expect(links).toHaveLength(1);
     for (const link of links) await click(link);
+    expect(openAgent.mock.calls.map(([id]) => id)).toEqual(["Refresh-2"]);
+
+    // A result or progress record without a host id has no navigation identity, even when an agent
+    // called `agent` exists: the label is plain text, and clicking nothing opens nothing.
+    const anonymous = await mount(createElement(ToolView, {
+      defaultOpen: true, name: "task", host,
+      args: { tasks: [{ name: "Anonymous", agent: "worker", task: "Import source" }] },
+      result: { content: [], details: {
+        results: [{ exitCode: 0, output: "done" }],
+        progress: [{ status: "running", description: "anonymous work" }],
+      } },
+    }));
+    expect(queryAll(anonymous.container, "tv-agent-link")).toHaveLength(0);
+    expect(textOf(anonymous.container)).toContain("agent");
     expect(openAgent.mock.calls.map(([id]) => id)).toEqual(["Refresh-2"]);
   });
 });

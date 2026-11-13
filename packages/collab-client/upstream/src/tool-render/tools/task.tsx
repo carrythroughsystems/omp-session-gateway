@@ -44,16 +44,32 @@ function taskItems(args: Record<string, unknown>): TaskItemView[] {
 	return flat.id || flat.description || flat.assignment || flat.steps.length > 0 ? [flat] : [];
 }
 
-/** First non-blank line of the work: the `task`, else the first step. */
+/** First non-blank line of the work: the assignment, else the first step. */
 function taskBrief(item: TaskItemView): string | null {
-	const text = item.assignment ?? item.steps[0] ?? "";
-	const line = text.split("\n").find(l => l.trim() !== "");
-	return line ? normalizeWs(line) : null;
+	for (const text of [item.assignment, item.steps[0]]) {
+		if (text === undefined || text === null) continue;
+		const line = text.split("\n").find(l => l.trim() !== "");
+		if (line) return normalizeWs(line);
+	}
+	return null;
 }
 
 /** "Anna.Bob" nesting → "Anna>Bob" breadcrumb (mirrors the TUI's formatTaskId). */
 function taskIdLabel(id: string): string {
 	return id.includes(".") ? id.split(".").join(">") : id;
+}
+
+/**
+ * The agent cell of a result or progress row. Only a host-reported id is a navigation
+ * identity; without one the label is plain text, never a link to some agent called "agent".
+ */
+function AgentCell({ id, host }: { id: string | null; host?: ToolRenderHost }): ReactNode {
+	if (id === null) return <span className="tv-faint">agent</span>;
+	return (
+		<AgentLink id={id} host={host}>
+			{taskIdLabel(id)}
+		</AgentLink>
+	);
 }
 
 function fmtDuration(ms: number): string {
@@ -97,7 +113,7 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 /** Final snapshot for one agent: status row, output preview, error/abort notes. */
 function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolRenderHost }): ReactNode {
 	const { label, tone } = resultStatus(res);
-	const id = str(res.id) ?? "agent";
+	const id = str(res.id);
 	const description = str(res.description);
 	const stats: string[] = [];
 	const tokens = num(res.tokens);
@@ -127,11 +143,7 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	return (
 		<>
 			<Row
-				k={
-					<AgentLink id={id} host={host}>
-						{taskIdLabel(id)}
-					</AgentLink>
-				}
+				k={<AgentCell id={id} host={host} />}
 			>
 				<Badge tone={tone}>{label}</Badge> {res.truncated === true && <Badge tone="warn">truncated</Badge>}{" "}
 				{description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
@@ -158,7 +170,7 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 				: status === "running"
 					? ("accent" as const)
 					: undefined;
-	const id = str(p.id) ?? "agent";
+	const id = str(p.id);
 	const description = str(p.description);
 	const intent = str(p.lastIntent) ?? str(p.currentTool);
 	const bits: string[] = [];
@@ -170,11 +182,7 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 	if (durationMs) bits.push(fmtDuration(durationMs));
 	return (
 		<Row
-			k={
-				<AgentLink id={id} host={host}>
-					{taskIdLabel(id)}
-				</AgentLink>
-			}
+			k={<AgentCell id={id} host={host} />}
 		>
 			<Badge tone={tone}>{status}</Badge> {description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
 			{intent && <span className="tv-muted">{truncate(normalizeWs(intent), 64)}</span>}{" "}
@@ -230,7 +238,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{tasks.length > 0 && (
 				<div className="tv-list">
 					{tasks.map((t, i) => (
-						<div key={t.id ?? i}>
+						<div key={t.id || i}>
 							<Row
 								k={
 									// A requested name is not an agent id: upstream allocates `Name-2` once the name is
@@ -256,7 +264,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{ordered.length > 0 && (
 				<div className="tv-list">
 					{ordered.map((res, i) => (
-						<AgentResult key={str(res.id) ?? i} res={res} host={host} />
+						<AgentResult key={str(res.id) || i} res={res} host={host} />
 					))}
 					{footer}
 				</div>
@@ -264,7 +272,7 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 			{showProgress && (
 				<div className="tv-list">
 					{progress.map((p, i) => (
-						<AgentProgressRow key={str(p.id) ?? i} p={p} host={host} />
+						<AgentProgressRow key={str(p.id) || i} p={p} host={host} />
 					))}
 				</div>
 			)}
