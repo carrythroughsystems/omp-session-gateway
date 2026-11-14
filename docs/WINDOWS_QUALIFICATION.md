@@ -65,6 +65,16 @@ Each attempt generates a UUIDv4 `<epoch>` and labels its resources `omp-winqual-
 
 Preflight also checks remaining per-tag creation allowance (`6` total VM creations in development mode, `4` in stable mode, one active VM at a time; provider quota metadata is unobservable).
 
+After the FreeRDP help/version checks, preflight makes three sequential, controller-local startup
+probes against the expected-closed `127.0.0.1:9`, with `SDL_VIDEO_DRIVER=dummy`, a dummy account and
+stdin line, and a synthetic certificate fingerprint. Each probe has a 3-second observation bound,
+then at most 1 second of `SIGTERM` grace before `SIGKILL`; every child is reaped and its pipes settled.
+Only the fixed `[freerdp_tcp_connect_timeout]:` marker counts: the pinned client's measured
+connection-refused output contains it, whereas display initialization failures do not. All other
+output is discarded, including output arriving after the observation bound. A missing marker fails
+closed as `helper_failed` / `harness` / `read_only` at `preflight`. No guest, provider, credential,
+listener, or persistent state is created by these bounded prerequisite probes.
+
 Every pre-existing instance and firewall ID outside the current `<epoch>` is added to `OMP_QUAL_PROTECTED_INSTANCES` and `OMP_QUAL_PROTECTED_FIREWALLS` for the attempt; the campaign or explicit development `run` is sufficient to provision without an extra opt-in environment variable.
 
 Guest access credentials (`default_password` and `standardUser`), infrastructure IDs, state digests, upload claims, and `pixelState` are stored only in the separate epoch vault `~/.local/share/omp-session-gateway/qualification/windows-vault/<epoch>.json` (`0700` parent, `0600` file), which is removed only after VM destruction and Pixel restoration.
@@ -80,6 +90,9 @@ Guest allocation, remote management, and toolchain staging enforce these bounds:
 - Each `transport` connectivity probe has at most 180 seconds, capped by the remaining combined deadline: on expiry the controller sends `SIGTERM`, the helper attempts command cleanup and shell closure, and after 5 seconds the controller sends `SIGKILL`, awaits exit, and drains both pipes.
 - Cancellation and positive-remainder guards run before persisting each `transportProbes` start record and synchronously before spawning (never clamping an exhausted budget to `1` ms), and guest dispatch re-checks the 3-hour resource lifetime (2 hours for `pixel_verified`, leaving the final hour for teardown) after vault/provider reads and the last checkpoint.
 - RDP (`sdl-freerdp`) reads the active `Remote Desktop` certificate SHA-256 over WinRM, pins `/cert:fingerprint:sha256:<hash>`, and passes the password via `/from-stdin:force` with no ignore/TOFU mode.
+- Every RDP session explicitly inherits the controller environment with `SDL_VIDEO_DRIVER=dummy`
+  overriding its video driver, so the release account needs no console display. Client stdout and
+  stderr remain discarded; the password remains stdin-only.
 - Before downloading tools into `C:\omp-winqual-<epoch>`, staging sets every active non-Tailscale adapter to `1.1.1.1` and `8.8.8.8`, clears the DNS cache, and verifies `github.com`, `pkgs.tailscale.com`, `registry.npmjs.org`, and `login.tailscale.com` resolve, failing as `name resolution failed: <host>` otherwise.
 - Tailscale joins via `tailscale up --unattended=true` (`--auth-key=file:... --accept-dns=true --ssh=false --timeout=120s`, deleting the key file in `finally`), verifying `tag:omp-session-gateway`, TUN mode up, Serve proxying HTTPS `443` to `http://127.0.0.1:4317`, and Funnel disabled.
 - For OMP, the runtime clones or fetches bare `can1357/oh-my-pi` into `dev/windows/source`, verifies `sourceCommit` and `sourceTree`, uploads and hash-checks `source.tar`, runs frozen Bun install (`bun-install`) and native Windows build (`omp-build`), writes `collab.autoStart: control` to `%USERPROFILE%\.omp\agent\config.yml`, and verifies `omp config get collab.autoStart --json` reads back `"control"` (because `omp config set` over WinRM can exit `0` without writing).
@@ -146,6 +159,14 @@ WinRM probes, archive uploads, and subprocess timeouts follow closed classificat
 - Boot socket errors: refused connections (`ECONNREFUSED`, peer RST answering SYN) and resets report `connection_reset`, and unreachable hosts or networks (`EHOSTUNREACH`, `ENETUNREACH`, `EHOSTDOWN`) report `connection_timeout` (unwrapped from `urllib3` `NewConnectionError` inside `requests` `MaxRetryError`) so a booting guest is retried within the admission and reconnect budgets.
 - Deadlines and FreeRDP termination: only a controller command timeout on an in-flight read-only connection probe produces `probe_deadline`; an execution-clipped command timer produces `deadline_exceeded` (`controllerDeadline: true`, `exitCode`, `signal`, `timeoutMs`) and an expired budget poll produces `deadline_exceeded` (`controllerDeadline: true`, `timeoutMs`, `waitedMs`), while rejected started mutations re-check execution expiry and keep `unknown` disposition.
 - Non-retryable terminations: external cancellation and raw `SIGTERM` exit `143` never produce `probe_deadline`, lane failures never grant campaign retry authority, and FreeRDP (`sdl-freerdp`) arms cancellation before `stdin` write/end and sends `SIGTERM` (then `SIGKILL` after `5` seconds) and awaits exit on every failure.
+- An RDP client exiting before interactive logon cancels and settles the in-flight guest observation
+  or poll sleep immediately, failing as `RDP client exited before interactive logon (status N)`.
+  Its typed evidence is `helper_failed` / `harness` / `confirmed`, with numeric `exitCode` only;
+  the active lane phase replaces the helper step. `confirmed` records the observed client outcome,
+  not proof that no guest logon happened: the lane's same-epoch zero-residue cleanup is still
+  required for failed-campaign settlement. It grants no automatic retry. A still-running client's
+  120-second (Administrator) or 240-second (standard account) logon deadline remains
+  `deadline_exceeded`; controller cancellation/expiry cannot become a late success.
 - Read-only reconnect budget: initial admission persists `transportStabilitySamples` and `transportStabilityDurationMs` before checkpointing (resumed admission reuses them only after reconnect; legacy boolean markers without counts must re-observe inside the 12-minute allocation window; completed admission never re-applies that allocation deadline).
 - Reconnect bounds: subsequent read-only calls, including cleanup, share a 90-second reconnect budget with 2, 4, 8, and 16 second delays and at most 5 calls, checking remaining time before each probe and after backoff and rejecting at-or-past-deadline results as `deadline_exceeded`.
 - Single-shot mutations: mutating guest actions, nested PowerShell commands, RDP logons, and uploads (`candidate.tar`, `predecessor.tar`, `source.tar`) record durable `started` and `complete` claims and are never replayed. Unsettled mutating phases (or legacy phases without claims) cannot resume, fresh upload authority exists only before `toolchain_staged` starts, completed uploads re-verify bytes, and upload completion never proves unpack, Tailscale join, build, or upgrade.
@@ -650,6 +671,12 @@ deliberately skips the display and therefore creates no session. One short conne
 an RDP logon fires the `LogonTrigger`, and a disconnected RDP session keeps its processes
 running, so the client does not need to stay attached. Lock 3389 to the operator's egress
 address alongside 5985.
+
+That fork-era Cocoa result is not a guarantee for the release account's non-console context.
+The current lane explicitly selects SDL's dummy video driver instead. Host-free regression tests
+and local startup probes do not prove that this driver reaches interactive logon on a real Windows
+guest; a bounded Windows development run must establish that before another stable campaign.
+Why FreeRDP 3.33.0 did not show the display failure seen with 3.33.1 is not established.
 
 Remaining to advertise Windows:
 

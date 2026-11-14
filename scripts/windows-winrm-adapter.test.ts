@@ -479,6 +479,70 @@ test("496 R2 RDP cancellation during stdin owns teardown before any further work
     { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 })).rejects.toThrow("deadline_exceeded");
   expect(calls).toEqual(["write", "kill", "exit"]);
 });
+test.each(["stdin", "read", "sleep"] as const)("headless RDP exit during %s fails immediately without changing live-client deadlines", async stage => {
+  for (const status of [0, 255]) {
+    let resolveExit!: (code: number) => void, now = 0, reads = 0;
+    const sleeps: number[] = [];
+    const child = {
+      stdin: { write: () => {}, end: () => { if (stage === "stdin") exit(); } },
+      exitCode: null as number | null,
+      exited: new Promise<number>(resolve => { resolveExit = resolve; }),
+      kill: () => { child.exitCode = 143; resolveExit(143); },
+    };
+    const exit = () => { child.exitCode = status; resolveExit(status); };
+    const failure = await winrmRuntime.settleWindowsRdp(child, "synthetic-stdin-only", async signal => {
+      await winrmRuntime.pollWindows(async () => {
+        reads += 1;
+        if (stage === "read") { exit(); await Promise.resolve(); }
+        return false;
+      }, 120_000, "certificate-pinned interactive RDP", undefined, {
+        now: () => now,
+        sleep: async (ms, signal) => {
+          if (stage === "sleep") { exit(); await Promise.resolve(); if (signal?.aborted) return; }
+          sleeps.push(ms); now += ms;
+        },
+      }, signal);
+    }).catch(error => error);
+    expect(failure.message).toBe(`RDP client exited before interactive logon (status ${status})`);
+    expect(normalizeQualificationFailures(failure)).toMatchObject([{
+      lane: "windows", reason: "helper_failed", class: "harness", operation: "confirmed", observations: { exitCode: status },
+    }]);
+    expect(failure.cause).toBeUndefined();
+    expect(reads).toBe(stage === "stdin" ? 0 : 1);
+    expect(sleeps).toEqual([]); expect(now).toBe(0);
+  }
+  // A live client still owns the existing poll deadline and termination, not an early-exit failure.
+  let now = 0, resolveExit!: (code: number) => void;
+  const signals: string[] = [];
+  const live = { stdin: { write: () => {}, end: () => {} }, exitCode: null as number | null,
+    exited: new Promise<number>(resolve => { resolveExit = resolve; }),
+    kill: (signal: string) => { signals.push(signal); live.exitCode = 143; resolveExit(143); } };
+  const failure = await winrmRuntime.settleWindowsRdp(live, "synthetic-stdin-only", () => winrmRuntime.pollWindows(
+    async () => false, 120_000, "certificate-pinned interactive RDP", undefined,
+    { now: () => now, sleep: async ms => { now += ms; } })).catch(error => error);
+  expect(failure.message).toBe("certificate-pinned interactive RDP timed out");
+  expect(failure.evidence).toMatchObject({ reason: "deadline_exceeded", class: "harness", operation: "read_only",
+    observations: { controllerDeadline: true, timeoutMs: 120_000, waitedMs: 120_000 } });
+  expect(signals).toEqual(["SIGTERM"]);
+});
+test("headless RDP exit cannot be hidden by a late successful observation or controller expiry", async () => {
+  let resolveExit!: (code: number) => void;
+  const child = { stdin: { write: () => {}, end: () => {} }, exitCode: null as number | null,
+    exited: new Promise<number>(resolve => { resolveExit = resolve; }),
+    kill: () => { child.exitCode = 143; resolveExit(143); } };
+  const execution = { signal: new AbortController().signal, deadline: performance.now() + 60_000, nextFailureId: () => 1820 };
+  const failure = await winrmRuntime.settleWindowsRdp(child, "synthetic-stdin-only", async () => {
+    child.exitCode = 255; resolveExit(255); await Promise.resolve();
+  }, execution).catch(error => error);
+  expect(failure).toBeInstanceOf(QualificationFailure);
+  expect(failure.evidence).toMatchObject({ id: 1820, reason: "helper_failed", operation: "confirmed" });
+  const live = { stdin: { write: () => {}, end: () => {} }, exitCode: null as number | null,
+    exited: new Promise<number>(resolve => { resolveExit = resolve; }),
+    kill: () => { live.exitCode = 143; resolveExit(143); } };
+  await expect(winrmRuntime.settleWindowsRdp(live, "synthetic-stdin-only", async () => {
+    execution.deadline = 0;
+  }, execution)).rejects.toThrow("deadline_exceeded");
+});
 test.each(["abort", "allocation"] as const)("496 R2 firewall rule refetch %s cannot authorize another POST", async kind => {
   const controller = new AbortController();
   const execution = { signal: controller.signal, deadline: performance.now() + 60_000, nextFailureId: () => 1 };
