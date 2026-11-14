@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.12.0] — 2026-11-13
 
-This release uses stock OMP v18.20.0 as its engineering baseline. The 4 changelog entries below record the changes since v0.11.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v18.20.0 as its engineering baseline. The 5 changelog entries below record the changes since v0.11.0. Historical receipts do not qualify these bytes.
 
 ### Changed
 
@@ -30,6 +30,8 @@ This release uses stock OMP v18.20.0 as its engineering baseline. The 4 changelo
 - Correct documented names and paths: the push state file is `push-state.json`, the Windows
   scheduled task is `OMP Session Gateway`, a custom OMP discovery directory is
   `~/<PI_CONFIG_DIR>/run/collab-hosts`, and `doctor` runs up to three conditional checks.
+- Run the Windows qualification lane's RDP client without a console display and fail immediately
+  on client exit, with bounded controller-local startup probes and typed cleanup-settled failures.
 
 ## [v0.11.0] — 2026-11-10
 
