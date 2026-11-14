@@ -168,7 +168,7 @@ Display wake (`wakeAndroidDisplay` in [`scripts/android-device.ts`](../scripts/a
 9. `doze_verified`, `forbidden_sinks_verified`, and `evidence_complete`: runs forced Doze last, recording `delivered_during_doze`, `delivered_after_doze_exit`, or `undelivered_after_doze_exit` ([ADR-031](DECISIONS.md#adr-031--qualify-a-windows-host-and-pixel-background-web-push-in-every-stable-campaign)), opens the WebAPK once to clear the settled request, and checks ten sinks, `gatewayStructuredLogsSafe: true`, and `gatewayLogsDiscarded: true` (`plutil` `/dev/null`).
 
 <!-- release-generate:campaign:start -->
-The v0.11.0 qualification stays bound to its recorded candidate and devices. The v0.12.0 campaign must pass these scenarios again on its exact signed bytes before its matrix is qualified. See the [release ledger](RELEASE_STATUS.md).
+The v0.12.0 campaign qualified these scenarios only for its recorded candidate and devices. Each later candidate must pass them again on its exact signed bytes; historical evidence does not transfer. See the [release ledger](RELEASE_STATUS.md).
 <!-- release-generate:campaign:end -->
 
 Each checkpoint precedes effects and stores only the attempt `epoch` UUID, SHA-256 identity `binding`, closed `phase`, `cleanupRequired`, boolean `device` and `browser` baselines, SHA-256 topic digests (`notificationTopicDigest`, `secondaryNotificationTopicDigest`, and optional `remoteNotificationTopicDigest`, without raw topics or instance IDs), optional `fleetPrepared`, bounded scalar `results` (`phaseElapsedMs` and delivery timings), and post-restoration `pixelBaseline`.

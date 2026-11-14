@@ -928,5 +928,13 @@
       "Android": "Pixel 8 Pro, Android 17, Chrome 157.0.8103.46; TestingBot, tunnel 4.9: Galaxy S24 (14.0.0, chrome 154.0.8037.126)",
       "iPhone and iPad": "TestingBot, tunnel 4.9: iPhone 17 Pro Max (26.6, safari 26.6.1); BrowserStack, tunnel 8.9: iPad (10th generation) (27.0, safari 27.0)"
     }
+  },
+  "publication": {
+    "tag": "v0.12.0",
+    "sourceCommit": "3d317d7fa5f30f9de206618600994a0417c13a98",
+    "archiveSha256": "1d40049e4a43cbd3343bc2bff40e1b653960e1b3aafa4c0a38a71008f9702038",
+    "runUrl": "https://github.com/carrythroughsystems/omp-session-gateway/actions/runs/43545505816",
+    "releaseUrl": "https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.12.0",
+    "publishedAt": "2026-11-14T02:21:46Z"
   }
 }
