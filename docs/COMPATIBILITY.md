@@ -37,7 +37,7 @@ See [Status vocabulary](#status-vocabulary) for the definitions of **Tested**, *
 ## Current claim
 
 <!-- release-generate:release:start -->
-v0.12.0 is qualified for stable promotion; publication is pending. [Release v0.12.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.12.0). Signed candidate v0.12.0-prealpha.2; source a87eec7a8ecaa6ecfe0fc0876f4fd504e6d7d8f7; archive SHA-256 dcca63e9a180faf7abdef62794651560e9e3894905889cbdbc84b64a5b63d1a0. Published v0.11.0 remains the predecessor. Stock OMP v18.20.0 (c308970263ae13744ea15ab67302e3dac840e266), Bun 1.4.4. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). Stable publication and published-byte smoke are pending.
+Stable v0.12.0 is published as immutable GitHub Latest. [Release v0.12.0](https://github.com/carrythroughsystems/omp-session-gateway/releases/tag/v0.12.0). Signed candidate v0.12.0-prealpha.2; source a87eec7a8ecaa6ecfe0fc0876f4fd504e6d7d8f7; archive SHA-256 dcca63e9a180faf7abdef62794651560e9e3894905889cbdbc84b64a5b63d1a0. Published v0.11.0 remains the predecessor. Stock OMP v18.20.0 (c308970263ae13744ea15ab67302e3dac840e266), Bun 1.4.4. All thirteen lanes passed; attempt counts and measured evidence are in the [release ledger](RELEASE_STATUS.md). The separate published-byte smoke passed; it does not expand the candidate matrix.
 <!-- release-generate:release:end -->
 
 Mac host qualification runs in a Virtualization.framework guest (`VirtualMac2,1`), which does not exercise bare-metal firmware, FileVault unlock, physical sleep/wake, or startup before login ([ADR-033](DECISIONS.md#adr-033--retain-a-macos-virtual-machine-as-the-campaign-mac)).
