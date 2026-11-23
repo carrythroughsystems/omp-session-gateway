@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceRevision": "884e2b5d59c3580c497f8664b4ff263ba3d66546",
+  "sourceRevision": "6539ed095a0295cc1a657f48cbc57083ac66e489",
   "upstreamClient": {
-    "tag": "v18.20.0",
-    "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+    "tag": "v19.1.1",
+    "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
     "packageVersion": "16.3.6"
   },
   "generatedBy": {
@@ -12,7 +12,7 @@
     "typescript": "7.0.2",
     "playwright": "1.62.1",
     "chromium": "151.0.7922.34",
-    "ffmpeg": "9.0",
+    "ffmpeg": "9.0.2",
     "ffprobe": "9.0.2"
   },
   "capture": {
@@ -33,8 +33,8 @@
   },
   "assets": {
     "omp-session-gateway-demo.gif": {
-      "bytes": 369424,
-      "sha256": "a361fcab3adb8aa39592f764d68e156c8862405d139cf7716c92c9b702e4c529",
+      "bytes": 371451,
+      "sha256": "3dd0a4ffe7ee3050fbb49b1841f9e170d74f8d894b232baba0a9150cd193ba98",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -70,8 +70,8 @@
       ]
     },
     "omp-session-gateway-demo.mp4": {
-      "bytes": 398969,
-      "sha256": "3c3f35828d2382eea84ed8b1a88654a2c1f94ca6aa77b69facacf8f59fe1dcce",
+      "bytes": 398982,
+      "sha256": "9a80114bdc594295020bec56b464c1f0e7121f4d780c6ad358f522bb2478f2f4",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
@@ -108,8 +108,8 @@
       ]
     },
     "omp-session-gateway-demo-poster.png": {
-      "bytes": 71649,
-      "sha256": "9bfa8abcb307226ebfba8880985a5f4452cc13770422b4a96575011a9535ca58",
+      "bytes": 71657,
+      "sha256": "be8bdf765c24573407e55f95c4c6f9eba774165f7c5ddbd345f353d4acdfa920",
       "width": 960,
       "height": 540,
       "provenance": "capture-only-presentation-composite",
