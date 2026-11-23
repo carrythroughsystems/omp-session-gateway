@@ -90,6 +90,7 @@ test("upload launches the pinned CLI with the Playwright browser and isolated lo
   expect(calls[2]?.environment.PERCY_CLIENT_ERROR_LOGS).toBe("false");
   expect(calls[2]?.environment.PERCY_DROPIN_DISABLE).toBe("true");
   expect(calls[2]?.environment.PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS).toBe("true");
+  expect(calls[2]?.environment.PERCY_SKIP_UPDATE_CHECK).toBe("true");
   expect(calls[2]?.environment.PERCY_LOGS_IN_MEMORY).toBe("1");
   expect(calls[2]?.environment.PERCY_ENABLE).toBeUndefined();
   expect(calls[2]?.environment.PERCY_PARALLEL_TOTAL).toBeUndefined();
