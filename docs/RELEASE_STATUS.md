@@ -1,13 +1,15 @@
 # Release status
 
-## Engineering update — OMP v19.1.0 (not a release)
+## Engineering update — OMP v19.1.1 (not a release)
 
 The host source pin and, in separate commits, the embedded browser client
-advance to `a7135b8f31826c878734388b648f52bed8da436e`
-(tree `e75acb551633c881e3de8f3e43c9f516a9f484a1`). This is source compatibility
+advance to `31ffee513f27a01bba7d4dfbe12bae239cdc646a`
+(tree `3f27b6346d6319234bcd91d8148c15d077cea436`). This is source compatibility
 work only. The daily canary, which installs npm `latest`, passed every Linux stage
 and every supported Windows stage on 19.0.0, 19.0.1 and 19.1.0, with
-`new-generation`, `fork` and `branch-rewind` the stages Windows skips. A release
+`new-generation`, `fork` and `branch-rewind` the stages Windows skips; 19.1.1
+changes the tracked collaboration paths only in extension docs and package
+versions and has no canary result yet. A release
 request still runs the canary pinned to its exact version. No candidate,
 qualification, signed publication or installed-byte smoke is recorded by this
 update. Published v0.12.0, its v18.20.0 qualification and the generated evidence

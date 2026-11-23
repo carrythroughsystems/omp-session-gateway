@@ -946,11 +946,11 @@ published v0.7.6 remains qualified on v18.8.9.
 
 ---
 
-**Engineering baseline update (2026-11-23):** Pin published mainline v19.1.0
-(`a7135b8f31826c878734388b648f52bed8da436e`, tree
-`e75acb551633c881e3de8f3e43c9f516a9f484a1`). `scripts/upstream-pins.ts` derives
+**Engineering baseline update (2026-11-23):** Pin published mainline v19.1.1
+(`31ffee513f27a01bba7d4dfbe12bae239cdc646a`, tree
+`3f27b6346d6319234bcd91d8148c15d077cea436`). `scripts/upstream-pins.ts` derives
 both native tarball/binary hashes after checking official npm integrity and shasum;
-the native file names are unchanged. Agent and wire packages are `19.1.0`;
+the native file names are unchanged. Agent and wire packages are `19.1.1`;
 collab-web stays `16.3.6`, and Bun stays `1.4.4` (upstream requires `>=1.4.4`).
 The registry, collab settings and collaboration documentation are byte-identical
 to v18.20.0: minimum host `18.1.20`, registry v1, discovery paths, query shapes,
@@ -958,9 +958,11 @@ to v18.20.0: minimum host `18.1.20`, registry v1, discovery paths, query shapes,
 renamed and gains TCP and raw-upgrade primitives; its endpoint, Unix-socket and
 named-pipe sources are unchanged.
 
-The host accepts writer-only `resume` and `deliver-queue` guest frames and an
-optional prompt `followUp` flag, coalesces queued subagent progress per agent id,
-and re-encodes the session's new `agent_pause` as the `agent_end` with
+The host changes below shipped in v19.1.0; v19.1.1 changes the tracked paths only in
+`docs/extensions.md` (extension todo backends) and package versions. The host
+accepts writer-only `resume` and `deliver-queue` guest frames and an optional
+prompt `followUp` flag, coalesces queued subagent progress per agent id, and
+re-encodes the session's new `agent_pause` as the `agent_end` with
 `isTerminal: false` and `yielded` flags that v18.20.0 hosts already sent. The
 embedded client follows the collab-web changes in its own reviewed refresh,
 committed separately with patch and provenance records in
@@ -971,9 +973,9 @@ gateway registry fields.
 
 The daily canary that installs npm `latest` passed every Linux stage and every
 supported Windows stage on 19.0.0, 19.0.1 and 19.1.0 (runs 44577425931,
-44779508819, 44923572742 and 45044046190). No candidate, qualification or
-installed-byte smoke is claimed, and published v0.12.0 stays bound to its
-recorded v18.20.0 qualification.
+44779508819, 44923572742 and 45044046190); 19.1.1 has no canary result yet. No
+candidate, qualification or installed-byte smoke is claimed, and published
+v0.12.0 stays bound to its recorded v18.20.0 qualification.
 
 ---
 
