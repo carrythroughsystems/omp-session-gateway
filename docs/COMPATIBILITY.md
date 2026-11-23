@@ -52,7 +52,7 @@ Under registry v1, the gateway validates only the fields it reads and ignores un
 
 Upstream reviews across OMP releases through `v19.1.1` verified that registry v1, the discovery file format and native IPC query contract, the relay envelope layout, and `collab.autoStart` match this contract ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). The embedded client preserves non-UTF-8 byte arrays in bash `details.trace` without rendering shell trace visualizations, and adapts single-message `wait` results from pre-`v18.17.0` OMP hosts.
 
-The canary's rewind matcher accepts upstream's positive `Rewound N turns` status as well as the old text. The daily canary, which installs npm `latest`, passed every Linux stage and every supported Windows stage on 19.0.0, 19.0.1 and 19.1.0, with `new-generation`, `fork` and `branch-rewind` the stages Windows skips by design, and a release request still runs the canary pinned to its exact version. Neither the matcher change nor those runs qualify a release.
+The canary's rewind matcher accepts upstream's positive `Rewound N turns` status as well as the old text. The daily canary, which installs npm `latest`, passed every Linux stage and every supported Windows stage on 19.0.0, 19.0.1 and 19.1.0, and the pull-request canary passed the same stages on 19.1.1, with `new-generation`, `fork` and `branch-rewind` the stages Windows skips by design; a release request still runs the canary pinned to its exact version. Neither the matcher change nor those runs qualify a release.
 
 <!-- release-generate:qualification:start -->
 | Surface | Current contract | Qualification |

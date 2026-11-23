@@ -9,8 +9,9 @@ work only. The daily canary, which installs npm `latest`, passed every Linux sta
 and every supported Windows stage on 19.0.0, 19.0.1 and 19.1.0, with
 `new-generation`, `fork` and `branch-rewind` the stages Windows skips; 19.1.1
 changes the tracked collaboration paths only in extension docs and package
-versions and has no canary result yet. A release
-request still runs the canary pinned to its exact version. No candidate,
+versions, and the pull-request canary at `c945ade8` (run 45122265372) installed
+19.1.1 and passed the same stages. A release request still runs the canary pinned
+to its exact version. No candidate,
 qualification, signed publication or installed-byte smoke is recorded by this
 update. Published v0.12.0, its v18.20.0 qualification and the generated evidence
 below remain unchanged.

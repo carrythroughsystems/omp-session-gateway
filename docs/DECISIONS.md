@@ -973,7 +973,8 @@ gateway registry fields.
 
 The daily canary that installs npm `latest` passed every Linux stage and every
 supported Windows stage on 19.0.0, 19.0.1 and 19.1.0 (runs 44577425931,
-44779508819, 44923572742 and 45044046190); 19.1.1 has no canary result yet. No
+44779508819, 44923572742 and 45044046190), and the pull-request canary at
+`c945ade8` (run 45122265372) installed 19.1.1 and passed the same stages. No
 candidate, qualification or installed-byte smoke is claimed, and published
 v0.12.0 stays bound to its recorded v18.20.0 qualification.
 
