@@ -53,7 +53,7 @@ Prerequisites: install Bun `1.4.4`, run `bun install --frozen-lockfile`, and run
 
 Upload mode also requires native **Node.js 24.22.0 LTS** on `PATH` (or via `OMP_VISUAL_NODE_EXECUTABLE`); only `@percy/cli` runs under Node while builds, workers, and local validation run on Bun. CI pins `actions/setup-node` by commit, verifies exactly 24.22.0, and passes `OMP_VISUAL_NODE_EXECUTABLE` to the runner; local uploads resolve native `node` from `PATH` and fail on absence with `reason=node-missing` and `visual upload: Node.js is required for Percy`.
 
-Never launch Percy with Bun (its HTTP API can appear started without answering health requests, creating a zero-snapshot build). `scripts/test-visual.ts` sets `PERCY_DROPIN_DISABLE=true` automatically so committed screenshots never seed or auto-approve baselines.
+Never launch Percy with Bun (its HTTP API can appear started without answering health requests, creating a zero-snapshot build). `scripts/test-visual.ts` sets `PERCY_DROPIN_DISABLE=true` automatically so committed screenshots never seed or auto-approve baselines, and `PERCY_SKIP_UPDATE_CHECK=true` so the live CLI makes no GitHub release lookup and a newer `@percy/cli` release cannot print the update warning that the runner treats as an unknown, fatal diagnostic.
 
 1. Create a dedicated **web** Percy project for these synthetic fixtures connected to this repository; never share a project or token with production captures or real sessions.
 2. Choose renderers in Percy project settings (recommended: **Chrome, Firefox, Safari, and Edge**, plus **Safari on iPhone** and **Chrome on Android** if quota allows), and confirm the billing multiplier for 21 snapshots; renderer availability and quota are account settings, not repository facts.

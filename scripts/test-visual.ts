@@ -327,6 +327,8 @@ async function runVisualProcess(
     PERCY_CLIENT_ERROR_LOGS: "false",
     PERCY_DROPIN_DISABLE: "true",
     PERCY_DO_NOT_CAPTURE_RESPONSIVE_ASSETS: "true",
+    // Each newer @percy/cli release otherwise prints a stderr update warning, which fails the upload.
+    PERCY_SKIP_UPDATE_CHECK: "true",
     OMP_VISUAL_PERCY_CHILD: "1",
     NO_COLOR: "1",
   });
