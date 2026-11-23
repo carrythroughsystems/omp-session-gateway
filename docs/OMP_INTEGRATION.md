@@ -12,7 +12,7 @@ Production deployment requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact l
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum OMP version supplying the native local registry (`collab.autoStart`). |
 | Engineering host baseline | `v19.1.0` (`a7135b8f31826c878734388b648f52bed8da436e`) | Exact OMP commit and Git tree (`e75acb551633c881e3de8f3e43c9f516a9f484a1`) in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). |
-| Embedded browser client | `v18.20.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.20.0`) | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md): independent `collab-web` source, wire dependency, and vendored `pi-utils` helper provenance, with bounded resync rejoin and older-host rendering retained. |
+| Embedded browser client | `v19.1.0` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `19.1.0`) | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md): independent `collab-web` source, wire dependency, and vendored `pi-utils` helper provenance, with bounded resync rejoin and older-host rendering retained. |
 | Gateway runtime | Bun `1.4.4` | Required runtime for `omp-gateway` (the CLI), `omp-gatewayd` (the daemon), and release archives. |
 
 For the latest release and its qualified hardware matrix, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).

@@ -46,7 +46,7 @@ Qualified attention and lifecycle scope covers the Mac-guest new-generation, for
 
 Stock mainline OMP `>= 18.1.20` ([PR #11908](https://github.com/can1357/oh-my-pi/pull/11908), commit `4999b98bd5`) is the minimum supported OMP version: set `collab.autoStart` ([Operator settings](OMP_INTEGRATION.md#1-operator-settings)) and start participating sessions with plain `omp`.
 
-The engineering host baseline (tested in CI) is `v18.20.0` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), the qualified host baseline is in the matrix below, and the embedded browser client is pinned to the same source (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `18.20.0`) in [`packages/collab-client`](../packages/collab-client/README.md).
+The engineering host baseline (tested in CI) is `v19.1.0` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), the qualified host baseline is in the matrix below, and the embedded browser client is pinned to the same source (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `19.1.0`) in [`packages/collab-client`](../packages/collab-client/README.md).
 
 Under registry v1, the gateway validates only the fields it reads and ignores unknown additive fields ([ADR-028](DECISIONS.md#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)); a registry major bump or a changed type on a consumed field requires a gateway update.
 
