@@ -20,7 +20,7 @@ describe("embedded client provenance", () => {
     expect(provenance.tree).toMatch(/^[a-f0-9]{40}$/);
     expect(provenance.tag).toBe(`v${manifest.dependencies["@oh-my-pi/pi-wire"]}`);
     expect(provenance.bunVersion).toBe("1.4.4");
-    expect(provenance.additionalSources).toHaveLength(7);
+    expect(provenance.additionalSources).toHaveLength(8);
     for (const source of provenance.additionalSources) {
       expect(source.commit).toBe(provenance.commit);
       expect(source.packageVersion).toBe(manifest.dependencies["@oh-my-pi/pi-wire"]);

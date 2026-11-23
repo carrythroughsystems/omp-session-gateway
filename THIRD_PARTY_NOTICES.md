@@ -12,9 +12,9 @@ source locations, and required attributions are included at the stated archive p
 
 ## Bundled runtime dependencies
 
-### @oh-my-pi/pi-wire@18.20.0
+### @oh-my-pi/pi-wire@19.1.0
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/v18.20.0/packages/wire>
+- Source: <https://github.com/can1357/oh-my-pi/tree/v19.1.0/packages/wire>
 - License: MIT
 - Copyright: Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/runtime/@oh-my-pi__pi-wire/LICENSE`
@@ -187,8 +187,8 @@ source locations, and required attributions are included at the stated archive p
 
 ### @oh-my-pi/collab-web@16.3.6
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266/packages/collab-web>
-- Pinned source: tag `v18.20.0`, commit `c308970263ae13744ea15ab67302e3dac840e266`
+- Source: <https://github.com/can1357/oh-my-pi/tree/a7135b8f31826c878734388b648f52bed8da436e/packages/collab-web>
+- Pinned source: tag `v19.1.0`, commit `a7135b8f31826c878734388b648f52bed8da436e`
 - License: MIT
 - Copyright: Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük; Copyright (c) 2026 Stencil Labs, Inc.
 - License text: `licenses/collab-web/LICENSE`
@@ -199,15 +199,16 @@ source locations, and required attributions are included at the stated archive p
   metadata stripping, bounds, volatile previews, transcript acknowledgements, and retry; foreground,
   online, relay-room, and gateway-health transport recovery; generation-bound sends with fresh hello;
   long-transcript windowing and coalescing-safe live-transition tail reset; exact-optional typing;
-  redacted capability errors; retained hub-family renderers; speech input; artwork exclusion; and
-  the gateway's self-hosted PUA symbol fallback. All dispositions are in `upstream/UPSTREAM.json`.
+  redacted capability errors; retained hub-family renderers and older hosts' `xd://` and
+  `artifact://` tool output; speech input; artwork exclusion; and the gateway's self-hosted PUA
+  symbol fallback. All dispositions are in `upstream/UPSTREAM.json`.
 
-### @oh-my-pi/pi-utils@18.20.0 — vendored pure helpers only
+### @oh-my-pi/pi-utils@19.1.0 — vendored pure helpers only
 
-- Source: <https://github.com/can1357/oh-my-pi/tree/c308970263ae13744ea15ab67302e3dac840e266/packages/utils/src>
+- Source: <https://github.com/can1357/oh-my-pi/tree/a7135b8f31826c878734388b648f52bed8da436e/packages/utils/src>
 - Exact source files: `marked.ts`, `marked/core.ts`, `marked/inline-closers.ts`,
-  `marked/inline-text.ts`, `marked-list.ts`, `math-delimiters.ts`, and `bytes.ts`, copied without modifications
-  into `packages/collab-client/upstream/src/vendor/pi-utils/`.
+  `marked/inline-text.ts`, `marked-list.ts`, `math-delimiters.ts`, `bytes.ts`, and `spill-url.ts`,
+  copied without modifications into `packages/collab-client/upstream/src/vendor/pi-utils/`.
 - License: MIT; original Marked MIT and Markdown BSD-3-Clause notices are preserved.
 - Copyright: Copyright (c) 2018+ MarkedJS; Copyright (c) 2011-2018 Christopher Jeffrey;
   Copyright (c) 2004 John Gruber; Copyright (c) 2025 Mario Zechner;

@@ -39,7 +39,7 @@
       "name": "@omp-session-gateway/collab-client",
       "version": "0.12.0",
       "dependencies": {
-        "@oh-my-pi/pi-wire": "18.20.0",
+        "@oh-my-pi/pi-wire": "19.1.0",
         "katex": "0.18.5",
         "lucide-react": "1.31.0",
         "react": "19.2.7",
@@ -68,7 +68,7 @@
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
-    "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@18.20.0", "", {}, "sha512-EgX/010dxeclR5GBY/Hq3P3mNnHxBicuxN2THRJI38bpwc8UzvJAyhSVjTIjmEp4SQpoc3zYPLeor93dQ+FK8Q=="],
+    "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@19.1.0", "", {}, "sha512-pS+MJEIyes8Jf2XtOcUVrtz7xXkUM18tmSCg1LNvtUEsla+c7XjS6VwtTlqhAIVofETkk+l9ioxlh6D0xm+YyQ=="],
 
     "@omp-session-gateway/collab-client": ["@omp-session-gateway/collab-client@workspace:packages/collab-client"],
 

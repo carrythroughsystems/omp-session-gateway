@@ -521,13 +521,19 @@ describe("CollabSocket browser lifecycle recovery", () => {
     socket.open();
     await socket.waitForSent(1);
     client.sendPrompt("blocked before welcome", [{ type: "image", data: "blocked", mimeType: "image/jpeg" }]);
+    client.sendPrompt("blocked follow-up before welcome", [], { followUp: true });
     client.sendAbort();
+    client.sendResume();
+    client.sendDeliverQueue();
     client.sendAgentCmd("chat", "blocked-agent", "blocked");
     client.applyFrameForTest(TEST_WELCOME);
     expect(client.getSnapshot().readOnly).toBeTrue();
 
     client.sendPrompt("blocked", [{ type: "image", data: "blocked-image", mimeType: "image/jpeg" }]);
+    client.sendPrompt("blocked follow-up", [], { followUp: true });
     client.sendAbort();
+    client.sendResume();
+    client.sendDeliverQueue();
     client.sendAgentCmd("chat", "blocked-agent", "blocked");
     const mutationSent = await Promise.race([
       socket.waitForSent(2).then(() => true),
@@ -569,6 +575,29 @@ describe("CollabSocket browser lifecycle recovery", () => {
       client.applyFrameForTest(TEST_WELCOME);
       expect(client.getSnapshot().phase).toBe("live");
       expect(client.getSnapshot().readOnly).toBe(link === TEST_LINK);
+    } finally {
+      client.close();
+    }
+  });
+
+  test("rejoins a joined guest whose later welcome fails to apply, without applying any of it", async () => {
+    const key = await importRoomKey(new Uint8Array(32));
+    const client = new GuestClient(TEST_CONTROL_LINK, "test guest");
+    try {
+      client.connect();
+      const socket = FakeWebSocket.instances[0]!;
+      socket.open();
+      await socket.waitForSent(1);
+      client.applyFrameForTest(TEST_WELCOME);
+      const header = client.getSnapshot().header;
+      // `agents` is read first, so the replacement header never lands.
+      client.applyFrameForTest({ ...TEST_WELCOME, header: { ...TEST_HEADER }, agents: null } as unknown as HostFrame);
+      expect(client.getSnapshot().phase).toBe("reconnecting");
+      expect(client.getSnapshot().header).toBe(header);
+      await socket.waitForSent(2);
+      expect((await decodeFrames(socket, key)).map(frame => frame.t)).toEqual(["hello", "hello"]);
+      client.applyFrameForTest(TEST_WELCOME);
+      expect(client.getSnapshot().phase).toBe("live");
     } finally {
       client.close();
     }
