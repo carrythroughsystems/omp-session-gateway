@@ -1,17 +1,20 @@
 # Release status
 
-## Engineering update — OMP v18.20.0 (not a release)
+## Engineering update — OMP v19.1.1 (not a release)
 
 The host source pin and, in separate commits, the embedded browser client
-advance to `c308970263ae13744ea15ab67302e3dac840e266`
-(tree `ba890953dd69eb4bf73bb7233bbe50ccfacd6912`). This is source compatibility
-work only. The canary now recognizes upstream's counted rewind status; the
-pull-request canary that installed npm `latest` (18.20.0) passed every Linux
-stage and every supported Windows stage, with `branch-rewind` among the stages
-Windows skips. A release request still runs the canary pinned to its exact version.
-No candidate, qualification, signed publication or installed-byte smoke is
-recorded by this update. Published v0.11.0 and the generated evidence below
-remain unchanged.
+advance to `31ffee513f27a01bba7d4dfbe12bae239cdc646a`
+(tree `3f27b6346d6319234bcd91d8148c15d077cea436`). This is source compatibility
+work only. The daily canary, which installs npm `latest`, passed every Linux stage
+and every supported Windows stage on 19.0.0, 19.0.1 and 19.1.0, with
+`new-generation`, `fork` and `branch-rewind` the stages Windows skips; 19.1.1
+changes the tracked collaboration paths only in extension docs and package
+versions, and the pull-request canary at `c945ade8` (run 45122265372) installed
+19.1.1 and passed the same stages. A release request still runs the canary pinned
+to its exact version. No candidate,
+qualification, signed publication or installed-byte smoke is recorded by this
+update. Published v0.12.0, its v18.20.0 qualification and the generated evidence
+below remain unchanged.
 
 <!-- release-generate:current:start -->
 ## Mainline v0.12.0 — published stable

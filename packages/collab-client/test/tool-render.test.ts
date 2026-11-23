@@ -407,6 +407,42 @@ describe("tool renderers across supported OMP releases", () => {
     expect(job).toContain("poll a1b2");
     expect(job).not.toContain("tv-out-title");
   });
+
+  test("nests current bash tool commands and keeps older hosts' xd:// device cards", () => {
+    const inner = { action: "discard", reason: "Unsafe migration" };
+    const nested = render({
+      name: "bash", args: { command: "reject --reason 'Unsafe migration'" },
+      result: { content: [{ type: "text", text: "Rejected" }], details: { exitCode: 0, toolCommands: [
+        { tool: "reject", mode: "execute", exitCode: 0, args: { reason: "Unsafe migration" }, inner },
+        { tool: "todo", mode: "help", exitCode: 0 },
+      ] } },
+    });
+    expect(nested).toContain('<div class="tv-cells">');
+    expect(nested).toContain('<span class="tv-name">reject</span>');
+    expect(nested).toContain("todo --help");
+
+    // Hosts before 19.1 dispatch the same command as `write xd://<device>`.
+    const legacy = render({
+      name: "write", args: { path: "xd://reject", content: "Unsafe migration" },
+      result: { content: [{ type: "text", text: "Rejected" }], details: { xdev: {
+        mode: "execute", tool: "reject", args: { reason: "Unsafe migration" }, inner,
+      } } },
+    });
+    expect(legacy).toContain('<span class="tv-name">xd://reject</span>');
+    expect(legacy).toContain("proposed → rejected");
+    expect(legacy).toContain("Unsafe migration");
+    expect(legacy).not.toContain('<span class="tv-name">write</span>');
+  });
+
+  test("labels a local:// spill and keeps older hosts' artifact stat on bash cards", () => {
+    const stats = (notice: string): string => render({
+      name: "bash", args: { command: "seq 100000" },
+      result: { content: [{ type: "text", text: `100000\n[raw output: ${notice}]` }], details: { wallTimeMs: 25 } },
+    });
+    expect(stats("local://7.log")).toContain("wall 25ms · local://7.log");
+    expect(stats("artifact://a1b2-c3")).toContain("wall 25ms · artifact a1b2-c3");
+    expect(stats("https://example.invalid/7.log")).not.toContain("wall 25ms · ");
+  });
 });
 
 describe("task drill-down", () => {

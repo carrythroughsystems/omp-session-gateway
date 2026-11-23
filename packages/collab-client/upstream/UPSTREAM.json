@@ -1,59 +1,59 @@
 {
   "repository": "https://github.com/can1357/oh-my-pi",
-  "commit": "c308970263ae13744ea15ab67302e3dac840e266",
-  "tree": "ba890953dd69eb4bf73bb7233bbe50ccfacd6912",
-  "tag": "v18.20.0",
+  "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
+  "tree": "3f27b6346d6319234bcd91d8148c15d077cea436",
+  "tag": "v19.1.1",
   "package": "@oh-my-pi/collab-web",
   "packageVersion": "16.3.6",
   "sourcePath": "packages/collab-web",
-  "observedAt": "2026-11-13",
+  "observedAt": "2026-11-23",
   "bunVersion": "1.4.4",
   "schemaVersion": 1,
   "additionalSources": [
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/marked.ts",
       "vendoredPath": "src/vendor/pi-utils/marked.ts",
       "blob": "75369d2cdb83f360ade03cafa325858ef631bce6"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/marked/core.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/core.ts",
-      "blob": "074f73c1bce275c2c8ec7ec6af35640dc0c18da5"
+      "blob": "49b3e70bdee2b565bce9039f124ca6225a1c6234"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/marked/inline-closers.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/inline-closers.ts",
-      "blob": "020cb64caebfa52630e33082653c607b3ecdea45"
+      "blob": "89e2b6d39dfb1be641fcacc0dbdc5df113b2d86f"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/marked/inline-text.ts",
       "vendoredPath": "src/vendor/pi-utils/marked/inline-text.ts",
       "blob": "f2072e9036048ef86d479cf2336336e7f893329b"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/marked-list.ts",
       "vendoredPath": "src/vendor/pi-utils/marked-list.ts",
       "blob": "f7fd8fb4ab5147576345f9427f9b8c05c4bf7fd0"
     },
     {
       "package": "@oh-my-pi/pi-utils",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "sourcePath": "packages/utils/src/math-delimiters.ts",
       "vendoredPath": "src/vendor/pi-utils/math-delimiters.ts",
       "blob": "dd0dcbb7fe62d1159f51150bc2d3fdad2ed8bc4f"
@@ -62,9 +62,17 @@
       "package": "@oh-my-pi/pi-utils",
       "sourcePath": "packages/utils/src/bytes.ts",
       "vendoredPath": "src/vendor/pi-utils/bytes.ts",
-      "packageVersion": "18.20.0",
-      "commit": "c308970263ae13744ea15ab67302e3dac840e266",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
       "blob": "2e003975f10be65ceed83e73b5999ce6ba0160b0"
+    },
+    {
+      "package": "@oh-my-pi/pi-utils",
+      "packageVersion": "19.1.1",
+      "commit": "31ffee513f27a01bba7d4dfbe12bae239cdc646a",
+      "sourcePath": "packages/utils/src/spill-url.ts",
+      "vendoredPath": "src/vendor/pi-utils/spill-url.ts",
+      "blob": "75450326e7996342ef48164664f06a8842558396"
     }
   ],
   "excludedEntrypoints": [
@@ -272,6 +280,10 @@
           {
             "file": "packages/collab-client/test/socket.test.ts",
             "case": "keeps a late non-resync error after a resync as a notice while the rejoin awaits its welcome"
+          },
+          {
+            "file": "packages/collab-client/test/socket.test.ts",
+            "case": "rejoins a joined guest whose later welcome fails to apply, without applying any of it"
           }
         ],
         "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
@@ -292,6 +304,26 @@
         ],
         "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
         "removeWhen": "Minimum supported host no longer emits these names."
+      },
+      {
+        "id": "legacy-xdev-and-artifact-notices",
+        "purpose": "Adopt upstream's nested bash tool-command cards and local:// spill stat while rendering older hosts' write xd://<device> dispatches as the device card and keeping the artifact stat of their artifact:// raw-output notices.",
+        "files": [
+          "src/tool-render/ToolView.tsx",
+          "src/tool-render/tools/bash.tsx"
+        ],
+        "proof": [
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "nests current bash tool commands and keeps older hosts' xd:// device cards"
+          },
+          {
+            "file": "packages/collab-client/test/tool-render.test.ts",
+            "case": "labels a local:// spill and keeps older hosts' artifact stat on bash cards"
+          }
+        ],
+        "upstreamStatus": "upstream 19.1.0 renders only bash tool-command records and local:// spills; hosts before 19.1.0 dispatch through write xd:// and hosts before 19.0.0 spill to artifact://",
+        "removeWhen": "The supported host floor no longer emits write xd:// dispatches or artifact:// raw-output notices."
       },
       {
         "id": "health-and-response-ack",
@@ -410,8 +442,7 @@
         "files": [
           "src/components/shell/Composer.tsx",
           "src/components/shell/shell.css",
-          "src/lib/photo-attachment.ts",
-          "src/lib/client.ts"
+          "src/lib/photo-attachment.ts"
         ],
         "proof": [
           {
@@ -431,12 +462,12 @@
             "case": "embedded active ask matches the original 3d shell interaction"
           }
         ],
-        "upstreamStatus": "gateway-specific; not supplied by the pinned upstream client",
+        "upstreamStatus": "upstream 19.1.0 sends prompt images in the same frame; capture, bounds, previews and acknowledgement retry remain gateway-specific",
         "removeWhen": "Upstream provides the same bounded phone-photo flow and acknowledgement/retry semantics."
       },
       {
         "id": "read-only-mutations",
-        "purpose": "Enforce View guards inside every mutating guest method, including image, Ask and agent commands.",
+        "purpose": "Enforce View guards inside every mutating guest method, including image and follow-up prompts, Ask responses, resume, deliver-queue and agent commands.",
         "files": [
           "src/lib/client.ts"
         ],
@@ -466,11 +497,12 @@
       },
       {
         "id": "pure-helper-imports",
-        "purpose": "Use seven exact pure pi-utils helper files instead of installing pi-utils or pi-natives.",
+        "purpose": "Use eight exact pure pi-utils helper files instead of installing pi-utils or pi-natives.",
         "files": [
           "src/lib/codec.ts",
           "src/components/transcript/Markdown.tsx",
-          "src/components/transcript/math.ts"
+          "src/components/transcript/math.ts",
+          "src/tool-render/tools/bash.tsx"
         ],
         "proof": [
           {

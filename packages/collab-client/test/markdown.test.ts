@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown, renderStreamingMarkdown, type FrozenMarkdownPrefix } from "../upstream/src/components/transcript/Markdown";
+import { Markdown, renderStreamingMarkdown, StreamingMarkdown, type FrozenMarkdownPrefix } from "../upstream/src/components/transcript/Markdown";
+import { mount, query, restoreDomGlobals, unmountAll } from "./react-dom-harness";
 
 function renderMarkdown(text: string): string {
   return renderToStaticMarkup(createElement(Markdown, { text }));
@@ -305,6 +306,23 @@ describe("streaming Markdown", () => {
         prefix = rendered.prefix;
       }
       expect(frozeRejectedLink).toBe(true);
+    }
+  });
+
+  test("keeps the mounted DOM equal to a one-shot render while frozen blocks grow and the text rewrites", async () => {
+    const doc = `${PARAGRAPHS}\n\n[safe](https://example.com) and a tail`;
+    const texts: string[] = [];
+    for (let len = 1; len < doc.length; len += 5) texts.push(doc.slice(0, len));
+    texts.push(doc, "uno\n\ntwo", "uno\n\ntwo\n\nthree");
+    try {
+      const tree = await mount(createElement(StreamingMarkdown, { text: texts[0]! }));
+      for (const text of texts) {
+        await tree.render(createElement(StreamingMarkdown, { text }));
+        expect(`<div class="tr-md">${query(tree.container, "tr-md")!.innerHTML}</div>`).toBe(renderMarkdown(text));
+      }
+    } finally {
+      await unmountAll();
+      restoreDomGlobals();
     }
   });
 });

@@ -3,7 +3,7 @@
  *
  * `bun test` provides no DOM and this package takes no test-only dependencies,
  * so these classes implement exactly the surface `react-dom/client` touches:
- * node insertion and removal, attributes, `innerHTML` for rendered markdown,
+ * node insertion and removal, attributes, `innerHTML` and `insertAdjacentHTML` for rendered markdown,
  * container-level event listeners, and the scroll metrics the transcript's
  * bottom lock reads. Every element is {@link ROW_PX} tall, so `scrollHeight` is
  * an exact function of the mounted children and scroll assertions are exact.
@@ -93,6 +93,10 @@ export class MiniNode {
   addEventListener(_type: string, _listener: Listener): void {}
 
   removeEventListener(_type: string, _listener: Listener): void {}
+
+  remove(): void {
+    this.parentNode?.removeChild(this);
+  }
 }
 
 export class MiniText extends MiniNode {
@@ -115,6 +119,17 @@ export class MiniComment extends MiniNode {
   }
 }
 
+/** One opaque `innerHTML` or `insertAdjacentHTML` fragment; the harness never parses markup. */
+export class MiniMarkup extends MiniNode {
+  readonly nodeName = "#markup";
+  readonly markup: string;
+
+  constructor(ownerDocument: MiniDocument, markup: string) {
+    super(ownerDocument);
+    this.markup = markup;
+  }
+}
+
 export class MiniElement extends MiniNode {
   readonly tagName: string;
   readonly nodeName: string;
@@ -123,8 +138,6 @@ export class MiniElement extends MiniNode {
   readonly style: Record<string, string> = {};
   readonly listeners = new Map<string, Set<Listener>>();
   namespaceURI = "http://www.w3.org/1999/xhtml";
-  /** Markdown arrives through `dangerouslySetInnerHTML`. */
-  markup = "";
   scrollTop = 0;
   type = "";
   value = "";
@@ -163,18 +176,23 @@ export class MiniElement extends MiniNode {
     this.nodeName = this.tagName;
   }
 
+  /** Markdown arrives through `dangerouslySetInnerHTML`, then streaming tails through `insertAdjacentHTML`. */
   set innerHTML(markup: string) {
-    this.markup = markup;
     this.childNodes.length = 0;
+    this.insertAdjacentHTML("beforeend", markup);
   }
 
   get innerHTML(): string {
-    return this.markup;
+    return this.childNodes.map(node => (node instanceof MiniMarkup ? node.markup : "")).join("");
+  }
+
+  insertAdjacentHTML(position: "beforeend", markup: string): void {
+    if (position !== "beforeend") throw new Error(`insertAdjacentHTML position ${position} is not modeled`);
+    if (markup !== "") this.appendChild(new MiniMarkup(this.ownerDocument, markup));
   }
 
   set textContent(text: string) {
     this.childNodes.length = 0;
-    this.markup = "";
     if (text !== "") this.appendChild(new MiniText(this.ownerDocument, text));
   }
 
@@ -272,9 +290,7 @@ export class MiniDocument extends MiniNode {
 /** Text of a subtree, with markdown `innerHTML` reduced to its text. */
 export function textOf(node: MiniNode): string {
   if (node.nodeType === 3) return node.nodeValue ?? "";
-  if (node instanceof MiniElement && node.markup !== "") {
-    return node.markup.replaceAll(/<[^>]*>/g, "");
-  }
+  if (node instanceof MiniMarkup) return node.markup.replaceAll(/<[^>]*>/g, "");
   let text = "";
   for (const child of node.childNodes) text += textOf(child);
   return text;

@@ -24,7 +24,7 @@ setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const expectedRuntimeDependencies = [
-  "@oh-my-pi/pi-wire@18.20.0",
+  "@oh-my-pi/pi-wire@19.1.1",
   "agent-base@7.1.4",
   "asn1.js@5.4.1",
   "bn.js@4.12.5",
@@ -128,9 +128,9 @@ test("derives only the bundled runtime dependency closure from bun.lock", async 
   );
 });
 
-test("retains the reviewed upstream license bytes across the 18.20.0 client refresh", async () => {
+test("retains the reviewed upstream license bytes across the 19.1.1 client refresh", async () => {
   const wire = RUNTIME_LICENSES["@oh-my-pi/pi-wire"];
-  expect(wire?.version).toBe("18.20.0");
+  expect(wire?.version).toBe("19.1.1");
   expect(wire?.licenseDeclared).toBe("MIT");
   expect(wire?.licenseConcluded).toBe("MIT");
   for (const [path, digest] of [
@@ -161,7 +161,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
   expect(document.packages.map(pkg => `${pkg.name}@${pkg.versionInfo}`)).toEqual([
     `omp-session-gateway@${PRODUCT_VERSION}`,
     "@oh-my-pi/collab-web@16.3.6",
-    "@oh-my-pi/pi-utils (vendored pure helpers)@18.20.0",
+    "@oh-my-pi/pi-utils (vendored pure helpers)@19.1.1",
     "Symbols Nerd Font Mono@v3.5.1",
     "Geist@v1.9.2",
     ...expectedRuntimeDependencies,
@@ -180,6 +180,7 @@ test("SPDX namespace, lock digest, and creation time bind reproducibly to releas
     "packages/utils/src/marked-list.ts",
     "packages/utils/src/math-delimiters.ts",
     "packages/utils/src/bytes.ts",
+    "packages/utils/src/spill-url.ts",
   ]);
   for (const source of client.additionalSources) expect(parser?.sourceInfo).toContain(source.sourcePath);
   expect(document.packages.find(pkg => pkg.name === "lucide-react")?.licenseDeclared).toBe("ISC");
