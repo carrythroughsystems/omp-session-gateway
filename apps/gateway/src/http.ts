@@ -615,8 +615,10 @@ export function createHttpHandler(options: {
     }
 
     if (url.pathname.startsWith("/api/")) return problem(404, "not_found", "Not found");
+    const bootstrap = clientRoute || requestBootstrap || updateBootstrap;
     const staticResponse = staticAssets.response(
-      clientRoute || requestBootstrap || updateBootstrap ? "/" : url.pathname,
+      bootstrap ? "/" : url.pathname,
+      !bootstrap && (request.method === "GET" || request.method === "HEAD") ? request.headers : undefined,
     );
     return staticResponse ?? new Response("Not found", { status: 404 });
   };
@@ -644,7 +646,8 @@ export function createHttpHandler(options: {
     const bootstrap = request.method === "GET" &&
       (url.pathname === "/client/" || url.pathname === "/update/" || parseNotificationRoute(url) !== undefined);
     return finalizeHttpResponse(response, config, {
-      document: response.status < 400 && response.headers.get("Content-Type")?.startsWith("text/html") === true,
+      document: response.status < 400 &&
+        (staticAssets.isDocumentRevalidation(response) || response.headers.get("Content-Type")?.startsWith("text/html") === true),
       noStore: url.pathname.startsWith("/api/") || bootstrap ||
         response.headers.get("Content-Type") === "application/problem+json",
       ...(request.method === "OPTIONS" || admittedOrigin === undefined ? {} : { corsOrigin: admittedOrigin }),

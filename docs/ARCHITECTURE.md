@@ -134,6 +134,11 @@ Activity-stop events share the ordered push dispatch queue with a record-local r
 
 #### Shell updates and caching
 
+At daemon startup, `static.ts` snapshots the shipped text and unhashed shell assets in memory and
+precomputes smaller Brotli and gzip variants for text. Hashed fonts stay file-backed. Compression
+does not add precompressed files to the release archive; a managed runtime activation restarts the
+daemon to load the new assets. See [Static assets](PROTOCOL.md#static-assets) for HTTP cache behavior.
+
 The service worker precaches the content-hashed application shell — including the pinned `collab-client` module, stylesheet, and upright Geist faces — while an idle directory preloads the client module so taps pay only for the capability `POST` and relay handshake.
 
 Session-title Private Use Area glyphs use first-party Symbols Nerd Font Mono WOFF2 chunks split by `unicode-range`, downloaded on demand with the italic Geist face and cached in the active shell cache after first fetch ([Service worker](../apps/web/README.md#service-worker)).

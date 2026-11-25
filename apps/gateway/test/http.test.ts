@@ -27,6 +27,7 @@ const viewCapability = ["HTTP", "VIEW", "CANARY", "00000000000000000000"].join("
 const controlCapability = ["HTTP", "CONTROL", "CANARY", "00000000000000000000"].join("__");
 const origin = "https://gateway.example.ts.net";
 const peer = { address: "127.0.0.1" } as const;
+const shellMarkup = `<!doctype html><title>OMP Sessions</title>${"<p>Synthetic session directory</p>".repeat(64)}`;
 let assetRoot = "";
 let assets: StaticAssetStore;
 
@@ -248,7 +249,7 @@ async function readSseEvent(reader: ReadableStreamDefaultReader<Uint8Array>): Pr
 
 beforeAll(async () => {
   assetRoot = await mkdtemp(join(tmpdir(), "gateway-http-assets-"));
-  await writeFile(join(assetRoot, "index.html"), "<!doctype html><title>OMP Sessions</title>");
+  await writeFile(join(assetRoot, "index.html"), shellMarkup);
   await mkdir(join(assetRoot, "client"));
   await mkdir(join(assetRoot, "assets"));
   await writeFile(join(assetRoot, "client", "index.html"), "<!doctype html><title>OMP client</title>");
@@ -1412,21 +1413,14 @@ describe("HTTP boundary", () => {
     expect(rejectedClient.status).toBe(400);
     expect(rejectedClient.headers.get("Cache-Control")).toContain("no-store");
 
-    const client = await handler(request("/client/"), peer);
-    expect(client.status).toBe(200);
-    expect(client.headers.get("Cache-Control")).toContain("no-store");
-    expect(await client.text()).toContain("OMP Sessions");
-    const update = await handler(request("/update/"), peer);
-    expect(update.status).toBe(200);
-    expect(update.headers.get("Cache-Control")).toContain("no-store");
-    expect(await update.text()).toContain("OMP Sessions");
-    const attention = await handler(
-      request("/collab/http-instance-000001?request=http-request-identity-0001"),
-      peer,
-    );
-    expect(attention.status).toBe(200);
-    expect(attention.headers.get("Cache-Control")).toContain("no-store");
-    expect(await attention.text()).toContain("OMP Sessions");
+    const headers = { "Accept-Encoding": "br", "If-None-Match": "*" };
+    for (const path of ["/client/", "/update/", "/collab/http-instance-000001?request=http-request-identity-0001"]) {
+      const response = await handler(request(path, { headers }), peer);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+      for (const header of ["Content-Encoding", "ETag", "Vary"]) expect(response.headers.has(header)).toBeFalse();
+      expect(await response.text()).toBe(shellMarkup);
+    }
     expect((await handler(request("/collab/short?request=http-request-identity-0001"), peer)).status).toBe(400);
     expect((await handler(request("/collab/http-instance-000001?request=short"), peer)).status).toBe(400);
   });
@@ -1591,12 +1585,14 @@ describe("browser-direct fleet boundary", () => {
     expectCors(list);
     expect(validateSessionList(await list.json())).toBe(true);
     for (const site of [undefined, "same-site", "cross-site"]) {
-      const launch = remoteLaunch();
+      const launch = remoteLaunch({ "Accept-Encoding": "br, gzip", "If-None-Match": "*" });
       if (site === undefined) launch.headers.delete("Sec-Fetch-Site");
       else launch.headers.set("Sec-Fetch-Site", site);
       const response = await handler(launch, peer);
       expect(response.status).toBe(200);
       expectCors(response);
+      expect(response.headers.has("Content-Encoding")).toBeFalse();
+      expect(response.headers.has("ETag")).toBeFalse();
       expect(await response.json()).toEqual({ mode: "view", generation: 3, capability: viewCapability });
     }
     const local = await handler(launchRequest(), peer);
@@ -1790,6 +1786,40 @@ describe("browser-direct fleet boundary", () => {
       });
       expectCors(finalized);
     }
+  });
+
+  test("revalidates the compressed HTML shell without changing its document policy or admitting CORS", async () => {
+    const handler = createTestHttpHandler({ config: fleetConfig(), registry: populatedRegistry(), staticAssets: assets });
+    const headers = { "Accept-Encoding": "br", Origin: dashboard };
+    const document = await handler(request("/", { headers }), peer);
+    expect(document.status).toBe(200);
+    expect(document.headers.get("Content-Encoding")).toBe("br");
+    expect(document.headers.get("Content-Security-Policy")).toContain(target.origin);
+    expect(document.headers.get("Permissions-Policy")).toContain("microphone=(self)");
+    expect(document.headers.get("Vary")).toBe("Accept-Encoding");
+    expectNoCors(document);
+    const etag = document.headers.get("ETag")!;
+    expect(etag).not.toBeNull();
+    for (const method of ["GET", "HEAD"]) {
+      const revalidated = await handler(request("/", { method, headers: { ...headers, "If-None-Match": etag } }), peer);
+      expect(revalidated.status).toBe(304);
+      expect(revalidated.body).toBeNull();
+      expect(revalidated.headers.has("Content-Type")).toBeFalse();
+      expect(revalidated.headers.get("ETag")).toBe(etag);
+      expect(revalidated.headers.get("Vary")).toBe("Accept-Encoding");
+      expectNoCors(revalidated);
+      for (const header of ["Content-Security-Policy", "Permissions-Policy"]) {
+        expect(revalidated.headers.get(header)).toBe(document.headers.get(header));
+      }
+    }
+  });
+
+  test("merges CORS Vary fields case-insensitively and removes validators from no-store responses", () => {
+    const response = new Response(null, { headers: { Vary: "Accept-Encoding, origin , ACCEPT-ENCODING", ETag: '"synthetic"' } });
+    const finalized = finalizeHttpResponse(response, fleetConfig(), { document: false, noStore: true, corsOrigin: dashboard });
+    expect(finalized.headers.get("Vary")).toBe("Accept-Encoding, origin");
+    expect(finalized.headers.get("Access-Control-Allow-Origin")).toBe(dashboard);
+    expect(finalized.headers.has("ETag")).toBeFalse();
   });
 
   test("extends only document CSP and microphone policy, preserving asset and bootstrap caching", async () => {

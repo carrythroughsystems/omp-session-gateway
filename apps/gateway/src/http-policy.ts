@@ -99,13 +99,26 @@ export function finalizeHttpResponse(
   if (options.noStore) {
     headers.set("Cache-Control", NO_STORE_CACHE_CONTROL);
     headers.set("Pragma", NO_STORE_PRAGMA);
+    headers.delete("ETag");
   }
   const origin = options.preflight?.origin ?? options.corsOrigin;
   if (origin !== undefined) {
     headers.set("Access-Control-Allow-Origin", origin);
-    headers.set("Vary", options.preflight === undefined
+    const corsVary = options.preflight === undefined
       ? "Origin"
-      : "Origin, Access-Control-Request-Method, Access-Control-Request-Headers");
+      : "Origin, Access-Control-Request-Method, Access-Control-Request-Headers";
+    const vary = headers.get("Vary");
+    if (vary === null) {
+      headers.set("Vary", corsVary);
+    } else {
+      const fields = new Map<string, string>();
+      for (const value of `${vary}, ${corsVary}`.split(",")) {
+        const field = value.trim();
+        const key = field.toLowerCase();
+        if (field !== "" && !fields.has(key)) fields.set(key, field);
+      }
+      headers.set("Vary", fields.has("*") ? "*" : [...fields.values()].join(", "));
+    }
   }
   if (options.preflight !== undefined) {
     headers.set("Access-Control-Allow-Methods", options.preflight.method);
