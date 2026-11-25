@@ -475,7 +475,7 @@ Warning — trust boundary: Enabling `tern` lets allowed Tailscale logins — in
 
 ### Creation outcomes
 
-All creations pass `--keep-open` to Tern so failed commands remain visible in their tab. If Tern reports that the created block's command ended, the gateway stops waiting without using the rest of the 110-second deadline ([Session creation state machine](PROTOCOL.md#session-creation-state-machine)).
+All creations pass `--keep-open` to Tern, so the tab stays readable after its command ends, including a command that exits with status 0. If Tern reports that the created block's command ended, the gateway stops waiting without using the rest of the 110-second deadline ([Session creation state machine](PROTOCOL.md#session-creation-state-machine)).
 
 | Outcome | What it means on the host | What the administrator does |
 |---|---|---|
