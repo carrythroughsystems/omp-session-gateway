@@ -65,7 +65,8 @@ test("cold boot overlaps client config and sessions and replaces an interrupted 
         if (reconnect) {
           await expect.poll(() => intercepted).toBe(1);
           await page.evaluate(() => window.dispatchEvent(new Event("online")));
-          await expect.poll(() => failed.get(requests[0]!)).toMatch(/aborted/iu);
+          // The held request can only end by the page's abort; WebKit words that as a cancellation.
+          await expect.poll(() => failed.get(requests[0]!)).toMatch(/aborted|cancell?ed/iu);
           await expect.poll(() => intercepted).toBe(2);
           await expect(row).toHaveCount(0);
           releaseConfig.resolve();
