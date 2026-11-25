@@ -1,4 +1,4 @@
-import { expect, type Page, type Route, test } from "@playwright/test";
+import { chromium, expect, type Browser, type Page, type Route, test } from "@playwright/test";
 import type { SessionMetadata } from "@omp-session-gateway/protocol";
 import { installSilentWebSocket, startDashboardFixture, type DashboardFixture } from "./fixture-server.ts";
 
@@ -127,6 +127,62 @@ test("an updated PWA activates and reloads an idle directory automatically", { t
     await expect(page.locator(".working-row")).toHaveCount(1);
   } finally {
     await fixture.stop();
+  }
+});
+
+test("a controlled reload and session fetch leave the worker stopped", { tag: "@serviceworker" }, async ({ browserName }) => {
+  test.skip(browserName !== "chromium", "Worker process inspection requires Chromium DevTools");
+  const metadata = session();
+  const fixture = await startDashboardFixture([metadata]);
+  let browser: Browser | undefined;
+
+  try {
+    // Chromium can warm the worker after routing a navigation to the network, off the critical
+    // path. Disable only that speculative startup in this case to detect fetch-driven wakeups.
+    browser = await chromium.launch({ args: ["--disable-features=ServiceWorkerStaticRouterStartServiceWorker"] });
+    const page = await browser.newPage();
+    const cdp = await page.context().newCDPSession(page);
+    const workerUrl = `${fixture.origin}/service-worker.js`;
+    let runningStatus: string | undefined;
+    const wakeups: string[] = [];
+    cdp.on("ServiceWorker.workerVersionUpdated", ({ versions }) => {
+      for (const version of versions) {
+        if (version.scriptURL !== workerUrl || version.status !== "activated") continue;
+        runningStatus = version.runningStatus;
+        if (runningStatus === "starting" || runningStatus === "running") wakeups.push(runningStatus);
+      }
+    });
+    await cdp.send("ServiceWorker.enable");
+    await page.goto(fixture.origin);
+    await waitForControlledWorker(page);
+
+    // Reload a same-scope document without shell asset requests or notification startup messages,
+    // either of which can legitimately wake the worker on a dashboard load.
+    await page.goto(`${fixture.origin}/icon.svg?sw-route-probe`);
+    await expect.poll(() => runningStatus).toBeDefined();
+    await cdp.send("ServiceWorker.stopAllWorkers");
+    await expect.poll(() => runningStatus).toBe("stopped");
+    wakeups.length = 0;
+    const scriptRequests = (): number => fixture.requests.filter(request => request === "GET /service-worker.js").length;
+    const beforeReload = scriptRequests();
+
+    expect((await page.reload())?.status()).toBe(200);
+    expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+    expect(wakeups, "the navigation woke the worker").toEqual([]);
+
+    const sessions = await page.evaluate(async () => {
+      const response = await fetch("/api/v1/sessions", { cache: "no-store" });
+      return { status: response.status, snapshot: await response.json() as unknown };
+    });
+    expect(sessions).toMatchObject({ status: 200, snapshot: { sessions: [metadata] } });
+    expect(wakeups, "the session API request woke the worker").toEqual([]);
+
+    // Chromium still checks the script after a controlled navigation without dispatching fetch.
+    await expect.poll(scriptRequests).toBeGreaterThan(beforeReload);
+    expect(wakeups, "checking the unchanged worker script woke the worker").toEqual([]);
+    expect(runningStatus).toBe("stopped");
+  } finally {
+    await Promise.all([browser?.close(), fixture.stop()]);
   }
 });
 

@@ -1019,6 +1019,41 @@ describe("notification service worker", () => {
     expect(cachePuts).toEqual([shellRequest.url]);
   });
 
+  test.each(["accepts", "throws for", "rejects"] as const)(
+    "installs the shell and attempts both network routes when addRoutes %s the first rule",
+    async outcome => {
+      cacheAdds.length = 0;
+      clientState.matchOptions.length = 0;
+      const rules: unknown[] = [];
+      const secondRule = Promise.withResolvers<void>();
+      let installCompletion: Promise<void> | undefined;
+      listener("install")({
+        addRoutes(rule: unknown): Promise<void> {
+          rules.push(rule);
+          if (rules.length > 1) return secondRule.promise;
+          if (outcome === "throws for") throw new TypeError("unsupported route");
+          if (outcome === "rejects") return Promise.reject(new TypeError("unsupported route"));
+          return Promise.resolve();
+        },
+        waitUntil(promise: Promise<void>): void { installCompletion = promise; },
+      });
+
+      // The fake cache can open in one microtask, but precaching must wait for both rules.
+      await Promise.resolve();
+      const earlyCacheAdds = cacheAdds.length;
+      secondRule.resolve();
+      await installCompletion;
+
+      expect(rules).toEqual([
+        { condition: { requestMode: "navigate" }, source: "network" },
+        { condition: { urlPattern: "/api/*" }, source: "network" },
+      ]);
+      expect(earlyCacheAdds).toBe(0);
+      expect(cacheAdds).toEqual([["/assets/app.0123456789ab.js"]]);
+      expect(clientState.matchOptions).toEqual(["skipWaiting"]);
+    },
+  );
+
   test("caches lazy fonts on first use without precaching or intercepting unlisted fonts", async () => {
     cacheAdds.length = 0;
     cachePuts.length = 0;

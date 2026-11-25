@@ -249,9 +249,29 @@ worker.addEventListener("notificationclick", event => {
   );
 });
 
-worker.addEventListener("install", event => {
+type NetworkRouteCondition = { requestMode: "navigate" } | { urlPattern: string };
+type StaticRoutingInstallEvent = ExtendableEvent & {
+  addRoutes?(rule: { condition: NetworkRouteCondition; source: "network" }): Promise<void>;
+};
+
+worker.addEventListener("install", (event: StaticRoutingInstallEvent) => {
   event.waitUntil(
     (async () => {
+      const addRoutes = event.addRoutes;
+      if (typeof addRoutes === "function") {
+        const addNetworkRoute = async (condition: NetworkRouteCondition): Promise<void> => {
+          try {
+            await addRoutes.call(event, { condition, source: "network" });
+          } catch {
+            // An unsupported rule still falls through to the fetch handler.
+          }
+        };
+        await Promise.all([
+          addNetworkRoute({ requestMode: "navigate" }),
+          // The string resolves against the worker script URL, excluding remote fleet APIs.
+          addNetworkRoute({ urlPattern: "/api/*" }),
+        ]);
+      }
       const cache = await caches.open(__CACHE_NAME__);
       await cache.addAll(__SHELL_ASSETS__);
       await worker.skipWaiting();

@@ -136,6 +136,8 @@ Activity-stop events share the ordered push dispatch queue with a record-local r
 
 The service worker precaches the content-hashed application shell — including the pinned `collab-client` module, stylesheet, and upright Geist faces — while an idle directory preloads the client module so taps pay only for the capability `POST` and relay handshake.
 
+Where supported, static routing sends navigations and same-origin `/api/` requests directly to the network without waiting for the worker to start. The browser can still start the worker in the background. The page remains controlled, shell caching is unchanged, and the fetch handler still lets requests through when a static rule is unavailable.
+
 Session-title Private Use Area glyphs use first-party Symbols Nerd Font Mono WOFF2 chunks split by `unicode-range`, downloaded on demand with the italic Geist face and cached in the active shell cache after first fetch ([Service worker](../apps/web/README.md#service-worker)).
 
 Activating a new worker deletes prior shell caches and calls `clients.claim()` without navigating windows because Chromium reports a window client's initial URL rather than history-API routes such as `/client/` ([ADR-018](DECISIONS.md#adr-018--activate-pwa-upgrades-automatically-without-interrupting-live-collaboration)).
