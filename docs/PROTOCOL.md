@@ -158,8 +158,8 @@ Common route rules (`apps/gateway/src/http.ts`, `apps/gateway/src/http-policy.ts
 ### Static assets
 
 On plain static `GET` and `HEAD`, JavaScript, CSS, HTML, SVG, JSON, and web manifests negotiate
-`br` or `gzip` from `Accept-Encoding` (at most 64 list entries) when the encoding saves bytes.
-Equal weights prefer Brotli, then gzip; no acceptable saved encoding or a `Range` request gets
+`br` or `gzip` from `Accept-Encoding` when the encoding saves bytes. Equal weights prefer Brotli,
+then gzip; no acceptable saved encoding, a list of more than 64 entries, or a `Range` request gets
 identity. These text assets send `Vary: Accept-Encoding` even when served unencoded. Fonts and
 binary images are never compressed.
 
@@ -168,10 +168,10 @@ ranges: a `Range` request receives the complete identity body with `200`.
 
 Unhashed shell files such as `/`, `/service-worker.js`, `/manifest.webmanifest`, and the icons have
 `Cache-Control: no-cache` and a strong `ETag` per available encoding. An `If-None-Match` of at most
-4 KiB that matches any current variant (including a weak comparison), or `*`, gets a bodyless
-`304` with the negotiated tag and no `Content-Type`. Hashed `/assets/` files remain immutable
-without validators. API responses and the `no-store` `/client/`, `/update/`, and notification
-bootstraps have neither static compression nor validators.
+4 KiB that names the negotiated variant's tag (a weak comparison), or `*`, gets a bodyless `304`
+with that tag and no `Content-Type`; another variant's tag gets the negotiated variant in full.
+Hashed `/assets/` files remain immutable without validators. API responses and the `no-store`
+`/client/`, `/update/`, and notification bootstraps have neither static compression nor validators.
 
 ### Directory and launch
 

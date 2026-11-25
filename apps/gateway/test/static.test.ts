@@ -53,6 +53,7 @@ test("negotiates supported encodings by weight and falls back to identity for Ra
     ["br;q=0.1234, gzip;q=.5", null],
     [`${"zstd,".repeat(63)}br`, "br"],
     [`${"zstd,".repeat(64)}br`, null],
+    [`*, ${"zstd,".repeat(63)}br;q=0`, null],
   ] as const) {
     const headers = new Headers();
     if (accept !== null) headers.set("Accept-Encoding", accept);
@@ -119,7 +120,7 @@ test("omits non-saving encodings, never encodes binaries, and never validates ha
   }
 });
 
-test("revalidates an unhashed shell against any current tag and returns the negotiated tag", async () => {
+test("revalidates an unhashed shell against the negotiated tag only", async () => {
   const store = await StaticAssetStore.load(await compressionFixture());
   for (const path of ["/", "/service-worker.js", "/manifest.webmanifest"]) {
     const tags = ["identity", "br", "gzip"].map(encoding => {
@@ -132,7 +133,7 @@ test("revalidates an unhashed shell against any current tag and returns the nego
     });
     expect(new Set(tags).size).toBe(3);
     const [identity, br, gzip] = tags as [string, string, string];
-    for (const condition of [identity, `"stale,opaque", W/${gzip}`, "*"]) {
+    for (const condition of [br, `"stale,opaque", W/${br}`, "*"]) {
       const response = store.response(path, new Headers({ "Accept-Encoding": "br", "If-None-Match": condition }))!;
       expect(response.status).toBe(304);
       expect(response.body).toBeNull();
@@ -143,6 +144,19 @@ test("revalidates an unhashed shell against any current tag and returns the nego
         expect(response.headers.has(header)).toBeFalse();
       }
     }
+    // Another coding's tag names a different representation, so the negotiated one is sent in full.
+    for (const condition of [identity, gzip]) {
+      const response = store.response(path, new Headers({ "Accept-Encoding": "br", "If-None-Match": condition }))!;
+      expect(response.status).toBe(200);
+      expect(response.headers.get("ETag")).toBe(br);
+      expect(response.headers.get("Content-Encoding")).toBe("br");
+    }
+    // Range selects identity, so a compressed tag does not revalidate it.
+    const ranged = store.response(path, new Headers({ Range: "bytes=0-7", "Accept-Encoding": "br", "If-None-Match": br }))!;
+    expect(ranged.status).toBe(200);
+    expect(ranged.headers.get("ETag")).toBe(identity);
+    expect(ranged.headers.has("Content-Encoding")).toBeFalse();
+    expect(await ranged.text()).toBe(textAssets[path === "/" ? "index.html" : path.slice(1) as keyof typeof textAssets]);
     const stale = store.response(path, new Headers({ "Accept-Encoding": "gzip", "If-None-Match": '"stale"' }))!;
     expect(stale.status).toBe(200);
     expect(stale.headers.get("ETag")).toBe(gzip);

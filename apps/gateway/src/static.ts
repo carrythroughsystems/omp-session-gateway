@@ -67,8 +67,11 @@ async function compressedRepresentation(
 
 function preferredEncoding(value: string | null, asset: StaticAsset): EncodedRepresentation | undefined {
   if (value === null || (asset.br === undefined && asset.gzip === undefined)) return undefined;
+  const tokens = value.split(",", MAX_ENCODING_TOKENS + 1);
+  // A longer list could hide a refusal past the bound, so it gets identity.
+  if (tokens.length > MAX_ENCODING_TOKENS) return undefined;
   let br: number | undefined, gzip: number | undefined, identity: number | undefined, wildcard: number | undefined;
-  for (const token of value.split(",", MAX_ENCODING_TOKENS)) {
+  for (const token of tokens) {
     const match = ENCODING_TOKEN.exec(token.trim());
     if (match === null) continue;
     const weight = match[2] === undefined ? 1 : Number(match[2]);
@@ -87,13 +90,13 @@ function preferredEncoding(value: string | null, asset: StaticAsset): EncodedRep
   return gzipWeight > 0 && gzipWeight >= identityWeight ? asset.gzip : undefined;
 }
 
-function matchesEtag(value: string | null, asset: StaticAsset): boolean {
+/** Weak comparison with the selected representation's tag; another coding's tag names other bytes. */
+function matchesEtag(value: string | null, etag: string): boolean {
   if (value === null || value.length > MAX_IF_NONE_MATCH_LENGTH) return false;
   if (value.trim() === "*") return true;
   for (const item of value.split(",")) {
     const tag = item.trim();
-    const strongTag = tag.startsWith("W/") ? tag.slice(2) : tag;
-    if (strongTag === asset.identity.etag || strongTag === asset.br?.etag || strongTag === asset.gzip?.etag) return true;
+    if ((tag.startsWith("W/") ? tag.slice(2) : tag) === etag) return true;
   }
   return false;
 }
@@ -134,7 +137,7 @@ export class StaticAssetStore {
       const etag = (encoded ?? asset.identity).etag;
       if (etag !== undefined) {
         headers["ETag"] = etag;
-        if (matchesEtag(requestHeaders.get("If-None-Match"), asset)) {
+        if (matchesEtag(requestHeaders.get("If-None-Match"), etag)) {
           const response = new Response(null, { status: 304, headers });
           if (asset.contentType.startsWith("text/html")) this.#documentRevalidations.add(response);
           return response;
