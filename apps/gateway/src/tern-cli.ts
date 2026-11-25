@@ -7,9 +7,32 @@ class NumericLexeme { constructor(readonly value: string) {} }
 type Json = null | boolean | string | NumericLexeme | Json[] | { [key: string]: Json };
 const invalid = (): never => { throw new Error("invalid Tern metadata"); };
 
+interface TernJsonBounds {
+  readonly maxBytes: number;
+  readonly maxValues: number;
+  readonly maxDepth: number;
+  readonly maxStringBytes: number;
+}
+const DEFAULT_JSON_BOUNDS: TernJsonBounds = {
+  maxBytes: 1024 * 1024,
+  maxValues: 50_000,
+  maxDepth: 32,
+  maxStringBytes: 8192,
+};
+const INSPECTION_JSON_BOUNDS: TernJsonBounds = {
+  ...DEFAULT_JSON_BOUNDS,
+  maxDepth: 512,
+  maxStringBytes: DEFAULT_JSON_BOUNDS.maxBytes,
+};
+
 /** Never passes a numeric token through Number, including unknown metadata fields. */
-export function parseTernJson(bytes: Uint8Array): Json {
-  if (bytes.byteLength > 1024 * 1024) return invalid();
+export function parseTernJson(
+  bytes: Uint8Array,
+  { maxBytes, maxValues, maxDepth, maxStringBytes }: TernJsonBounds = DEFAULT_JSON_BOUNDS,
+): Json {
+  if (bytes.byteLength > maxBytes) return invalid();
+  // A decoded JSON string takes no more UTF-8 bytes than its source.
+  const checkStringBytes = bytes.byteLength > maxStringBytes;
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { return invalid(); }
   let at = 0;
@@ -23,14 +46,14 @@ export function parseTernJson(bytes: Uint8Array): Json {
       if (char === '"') {
         let value: unknown;
         try { value = JSON.parse(text.slice(start, at)); } catch { return invalid(); }
-        if (typeof value !== "string" || Buffer.byteLength(value) > 8192) return invalid();
+        if (typeof value !== "string" || (checkStringBytes && Buffer.byteLength(value) > maxStringBytes)) return invalid();
         return value;
       }
     }
     return invalid();
   };
   const value = (depth: number): Json => {
-    if (++count > 50_000 || depth > 32) return invalid();
+    if (++count > maxValues || depth > maxDepth) return invalid();
     space();
     const char = text[at];
     if (char === '"') return string();
@@ -93,7 +116,7 @@ export interface TernInspection {
   readonly panes: readonly { readonly paneId: string; readonly sessionBasename?: string }[];
 }
 export function parseTernInspection(bytes: Uint8Array): TernInspection {
-  const root = object(parseTernJson(bytes));
+  const root = object(parseTernJson(bytes, INSPECTION_JSON_BOUNDS));
   const blocks: string[] = [];
   let tabs = 0;
   for (const session of array(root.sessions, 64)) {

@@ -391,6 +391,9 @@ Every state transition is durably written and `fsync`-committed to `<stateDir>/s
 | `awaiting_omp` | `ready` | Unique 1:1 Tern block/pane match and fresh **Control**-authorized OMP binding adopted. |
 | `awaiting_omp` | `started_unavailable` | `correlation_ambiguous`, `control_unavailable` (`view`-only at deadline), `adoption_timeout` (110 s), or `interrupted`. |
 
+- Tern inspection JSON is limited to 1 MiB and depth 512 from root depth 0. Unused strings are
+  bounded only by the document size; `omp_session_file` remains limited to 4,096 UTF-8 bytes.
+  The unchanged 50,000-value cap can still reject very large windows.
 - Adoption polls `tern inspect --json` every 1 second (5 s / 1 MiB bound) and post-spawn OMP discovery (`refreshForAdoption`) until one local `block === blocks[].id === panes[].pane` has an `omp_session_file` basename `<sessionId>` token matching a single fresh OMP host (`startedAt` and `createdAt` at or after `tern new tab` spawn time, outside baseline IDs) authorized for `control` ([Opt-in creation and adoption](OMP_INTEGRATION.md#opt-in-creation-and-adoption)).
 - Optional `tern.window` (`""` or `"2"`–`"999"`) adds `--window <KEY>` to every `inspect` and `new tab` subprocess without exposing a wire field or falling back to another window: missing window slots report `tern_unavailable` in options or `failed` (`preflight_failed`) before spawn, and closed windows during adoption end at `started_unavailable` (`adoption_timeout`).
 - Terminal states (`ready`, `failed`, `started_unavailable`, `outcome_unknown`) are immutable, total daemon execution is bounded to 110 seconds on a monotonic clock from acceptance, and `ready` returns `{ instanceId, generation }` so the browser refreshes the source and calls `POST /api/v1/sessions/:instanceId/launch` (`mode: "control"`).
