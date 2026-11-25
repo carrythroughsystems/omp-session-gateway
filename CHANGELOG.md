@@ -6,6 +6,46 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [v0.13.0] — 2026-11-25
+
+This release uses stock OMP v19.1.1 as its engineering baseline. The 12 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
+
+### Added
+
+- When a new Tern session's command ends before OMP can be opened, OMP Sessions points to the
+  kept-open tab instead of waiting for the adoption timeout.
+
+### Changed
+
+- Move the toolchain and the release runtime floor to Bun 1.4.5, a Bun security release:
+  installing this release needs Bun 1.4.5 or newer. Earlier releases keep their qualification.
+- Adopt new Tern sessions sooner by overlapping preflight checks and refreshing OMP discovery
+  with bounded backoff after Tern reports the session-file basename.
+- Run independent `omp-gateway doctor` probes concurrently to shorten diagnostics.
+- Request the first session list alongside fleet configuration to show the directory sooner.
+- Advance the independent host engineering baseline to stock OMP 19.1.1 with measured source and
+  native pins; retain the minimum host and published qualification.
+- Refresh the embedded client and wire dependency to exact OMP 19.1.1 source: rejoin instead of
+  going live when a later welcome fails to apply, keep finished streaming Markdown blocks' DOM,
+  nest bash tool-command cards, show brief intent labels and answerless web-search excerpts; keep
+  View guards on the new resume and deliver-queue senders and older hosts' xd:// and artifact://
+  rendering.
+- Send navigations and same-origin `/api/` requests directly to the network in browsers with
+  service-worker static routing, so those requests do not wait for the worker to start.
+- Serve static text assets with Brotli or gzip, compressed in memory at startup, and revalidate
+  unhashed shell files with `ETag`. API and bootstrap responses and the release archive are
+  unchanged. Text assets and shell files no longer answer byte-range requests.
+
+### Fixed
+
+- Leave the session rows in place when a directory refresh changes nothing. A tap that spanned
+  such a refresh was dropped and keyboard focus could move. A refresh that changes a row still
+  replaces the list. Row actions now use the current session generation and request.
+- Run the advisory Percy upload with the CLI's release check disabled, so a newer `@percy/cli`
+  release no longer prints the update warning that failed every finalized upload.
+- Keep Tern session creation available when a pane in the window has a long title or argument,
+  or a tab is deeply split; such unread metadata no longer invalidates the whole inspection.
+
 ## [v0.12.0] — 2026-11-13
 
 This release uses stock OMP v18.20.0 as its engineering baseline. The 5 changelog entries below record the changes since v0.11.0. Historical receipts do not qualify these bytes.

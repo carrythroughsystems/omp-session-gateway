@@ -1,1 +1,0 @@
-- Request the first session list alongside fleet configuration to show the directory sooner.
