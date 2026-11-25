@@ -158,7 +158,7 @@ Read the [security model](docs/SECURITY.md) or [report a vulnerability privately
 | Android | A physical Pixel (Chrome on Android), including background alerts; a cloud Samsung Galaxy |
 | iPhone & iPad | A cloud iPhone and iPad on Safari; iPhone background alerts in the Home Screen app (not the lock screen) |
 | Desktop Chrome, Edge, Firefox, Safari | CI only (Chromium, Firefox, and WebKit engines) |
-| Exact qualified OMP | `v18.20.0` ([`c308970263`](https://github.com/can1357/oh-my-pi/commit/c308970263ae13744ea15ab67302e3dac840e266)); Bun `1.4.4` |
+| Exact qualified OMP | `v19.1.1` ([`31ffee513f`](https://github.com/can1357/oh-my-pi/commit/31ffee513f27a01bba7d4dfbe12bae239cdc646a)); Bun `1.4.5` |
 
 Every row is **supported**: tested in CI on each change, bug reports accepted. **Qualified** names the exact hardware, OS, and browser versions verified for the latest release — see [Platforms and browsers](docs/COMPATIBILITY.md#platforms-and-browsers) and [Current claim](docs/COMPATIBILITY.md#current-claim).
 
