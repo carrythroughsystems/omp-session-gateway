@@ -163,6 +163,9 @@ Equal weights prefer Brotli, then gzip; no acceptable saved encoding or a `Range
 identity. These text assets send `Vary: Accept-Encoding` even when served unencoded. Fonts and
 binary images are never compressed.
 
+Text assets and unhashed shell files are served from the startup snapshot and do not answer byte
+ranges: a `Range` request receives the complete identity body with `200`.
+
 Unhashed shell files such as `/`, `/service-worker.js`, `/manifest.webmanifest`, and the icons have
 `Cache-Control: no-cache` and a strong `ETag` per available encoding. An `If-None-Match` of at most
 4 KiB that matches any current variant (including a weak comparison), or `*`, gets a bodyless
