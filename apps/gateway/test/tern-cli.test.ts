@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { TernCli, matchingTernBasename, parseTernInspection, parseTernJson, sessionBasenameMatches, validateTernRuntime } from "../src/tern-cli.ts";
 import type { TernProfile } from "../src/config.ts";
+import { validateCreationLedger } from "../src/tern-creation.ts";
 import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
@@ -63,6 +64,95 @@ describe("lossless bounded Tern metadata", () => {
     expect(JSON.stringify(parsed)).not.toContain("/synthetic/");
     expect(JSON.stringify(parsed)).not.toContain("identity");
     expect(JSON.stringify(parsed)).not.toContain("clients");
+  });
+  test("parses sanitized Tern 0.9.33 terminal and file blocks with lossless basename matching", async () => {
+    const fixture = new Uint8Array(await Bun.file(new URL("./fixtures/tern-inspect-0.9.33-mixed-blocks.json", import.meta.url)).arrayBuffer());
+    const parsed = parseTernInspection(fixture);
+    const fileBlock = "9007199254741027";
+    expect(parsed.blocks).toHaveLength(9);
+    expect(parsed.panes).toHaveLength(8);
+    expect(parsed.blocks.filter(id => !parsed.panes.some(({ paneId }) => paneId === id))).toEqual([fileBlock]);
+    for (const [id, token] of [
+      ["9007199254740997", "synthetic-session-1"],
+      ["9007199254741001", "synthetic-session-2"],
+    ] as const) {
+      const file = matchingTernBasename(parsed, id)!;
+      expect(file).toBe(`2026-11-24T00-00-00-000Z_${token}.jsonl`);
+      expect(sessionBasenameMatches(file, token)).toBe(true);
+    }
+    for (const id of [
+      "9007199254741007", // exited: null
+      "9007199254741011", // exited: 0
+      "9007199254741015", // exited: 1, keep_open: true
+      "9007199254741019", // exited: 1, keep_open: false
+      "9007199254741023", // exited: null
+      fileBlock,
+      "9007199254741031", // exited: 127
+    ]) {
+      expect(parsed.blocks).toContain(id);
+      expect(matchingTernBasename(parsed, id)).toBeUndefined();
+    }
+  });
+  test.skipIf(process.platform === "win32")("adopts the local block from a sanitized Tern 0.9.33 receipt", async () => {
+    const receipt = await Bun.file(new URL("./fixtures/tern-new-tab-0.9.33.json", import.meta.url)).text();
+    const fixture = await fake("success", receipt);
+    const cli = new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS });
+    expect(await cli.createTab(fixture.copy, fixture.profile, new AbortController().signal))
+      .toEqual({ kind: "started", blockId: "9007199254741105", spawnedAt: spawnTime });
+  });
+  test.each(["args", "title"] as const)("parses and discards a 9,000-byte inspection %s", field => {
+    const value = "界".repeat(3_000); // 9,000 UTF-8 bytes.
+    const withMetadata = (metadata: Record<string, string | string[]>) => bytes(JSON.stringify({
+      sessions: [{ tabs: [{ blocks: [{ id: 1 }, { id: 2, ...metadata }] }] }],
+      panes: [{ pane: 1, omp_session_file: "/synthetic/session-one.jsonl" }, { pane: 2, ...metadata }],
+    }));
+    const baseline = parseTernInspection(withMetadata({}));
+    const parsed = parseTernInspection(withMetadata({ [field]: field === "args" ? [value] : value }));
+    expect(parsed.blocks).toEqual(baseline.blocks);
+    expect(parsed.panes).toEqual(baseline.panes);
+    expect(JSON.stringify(parsed)).not.toContain(value);
+  });
+  test("parses an inspection tab with deeply nested splits", () => {
+    const tree = '{"Split":{"children":[{"Leaf":1},'.repeat(14) + '{"Leaf":1}' + ']}}'.repeat(14);
+    const text = `{"sessions":[{"tabs":[{"blocks":[{"id":1}],"splits":${tree}}]}],"panes":[{"pane":1}]}`;
+    expect(parseTernInspection(bytes(text))).toMatchObject({ blocks: ["1"], panes: [{ paneId: "1" }] });
+  });
+  test("enforces inspection byte and depth bounds without overflowing the stack", () => {
+    const maxBytes = 1024 * 1024;
+    const document = (depth: number): string => {
+      // The root is depth zero; the final string occupies the requested depth.
+      const start = '{"sessions":[],"panes":[],"ignored":' + '{"nested":'.repeat(depth - 1) + '"';
+      const end = '"' + "}".repeat(depth);
+      return start + "x".repeat(maxBytes - start.length - end.length) + end;
+    };
+    const bounded = document(512);
+    expect(parseTernInspection(bytes(bounded))).toMatchObject({ blocks: [], panes: [] });
+    expect(() => parseTernInspection(bytes(bounded + " "))).toThrow("invalid Tern metadata");
+    for (const depth of [513, 10_000]) {
+      expect(() => parseTernInspection(bytes(document(depth)))).toThrow("invalid Tern metadata");
+    }
+  });
+  test("bounds inspection work to 50,000 JSON values", () => {
+    const prefix = '{"sessions":[],"panes":[],"ignored":[';
+    const items = "null,".repeat(49_995) + "null"; // Array items plus the root and three arrays.
+    expect(parseTernInspection(bytes(prefix + items + "]}"))).toMatchObject({ blocks: [], panes: [] });
+    expect(() => parseTernInspection(bytes(prefix + items + ",null]}"))).toThrow("invalid Tern metadata");
+  });
+  test("still caps inspection omp_session_file paths at 4,096 bytes", () => {
+    const withFile = (omp_session_file: string) => bytes(JSON.stringify({
+      sessions: [{ tabs: [{ blocks: [{ id: 1 }] }] }],
+      panes: [{ pane: 1, omp_session_file }],
+    }));
+    const suffix = "/session-two.jsonl";
+    const path = "/" + "x".repeat(4096 - 1 - suffix.length) + suffix;
+    expect(parseTernInspection(withFile(path)).panes[0]?.sessionBasename).toBe("session-two.jsonl");
+    expect(() => parseTernInspection(withFile(path + "x"))).toThrow("invalid Tern metadata");
+  });
+  test("retains the creation ledger's 8,192-byte string and depth-32 bounds", () => {
+    for (const metadata of [JSON.stringify("x".repeat(8193)), "[".repeat(32) + "null" + "]".repeat(32)]) {
+      const ledger = `{"version":1,"operations":[],"metadata":${metadata}}`;
+      expect(() => validateCreationLedger(ledger)).toThrow("invalid Tern metadata");
+    }
   });
   test("preserves unsafe-number neighbors and projects only basenames, with exact one-to-one equality", () => {
     const parsed = parseTernInspection(bytes(inspect("9007199254740993")));

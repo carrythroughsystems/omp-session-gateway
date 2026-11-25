@@ -1,0 +1,550 @@
+{
+  "sessions": [
+    {
+      "id": 9007199254740993,
+      "name": "synthetic",
+      "shown": false,
+      "tabs": [
+        {
+          "id": 9007199254740995,
+          "number": 1,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254740997,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254740997
+          }
+        },
+        {
+          "id": 9007199254740999,
+          "number": 2,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741001,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741001
+          }
+        }
+      ]
+    },
+    {
+      "id": 9007199254741003,
+      "name": "synthetic",
+      "shown": true,
+      "tabs": [
+        {
+          "id": 9007199254741005,
+          "number": 1,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741007,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": true,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741007
+          }
+        },
+        {
+          "id": 9007199254741009,
+          "number": 2,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741011,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": 0,
+              "keep_open": true,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741011
+          }
+        },
+        {
+          "id": 9007199254741013,
+          "number": 3,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741015,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": 1,
+              "keep_open": true,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741015
+          }
+        },
+        {
+          "id": 9007199254741017,
+          "number": 4,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741019,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": 1,
+              "keep_open": false,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741019
+          }
+        },
+        {
+          "id": 9007199254741021,
+          "number": 5,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741023,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": true,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741023
+          }
+        },
+        {
+          "id": 9007199254741025,
+          "number": 6,
+          "name": null,
+          "shown": true,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741027,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "",
+              "args": [
+                "synthetic"
+              ],
+              "command": null,
+              "file": "/synthetic/path",
+              "cols": 80,
+              "rows": 24,
+              "exited": null,
+              "keep_open": false,
+              "focused": true,
+              "live": false
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741027
+          }
+        },
+        {
+          "id": 9007199254741029,
+          "number": 7,
+          "name": null,
+          "shown": false,
+          "zoomed": false,
+          "blocks": [
+            {
+              "id": 9007199254741031,
+              "title": "synthetic",
+              "cwd": "/synthetic/path",
+              "program": "/synthetic/path",
+              "args": [
+                "synthetic"
+              ],
+              "command": "synthetic",
+              "cols": 80,
+              "rows": 24,
+              "exited": 127,
+              "keep_open": true,
+              "focused": true,
+              "live": true
+            }
+          ],
+          "splits": {
+            "Leaf": 9007199254741031
+          }
+        }
+      ]
+    }
+  ],
+  "detached": [],
+  "panes": [
+    {
+      "pane": 9007199254740997,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": "/synthetic/omp/sessions/2026-11-24T00-00-00-000Z_synthetic-session-1.jsonl",
+      "quiet_ms": 100,
+      "working": true
+    },
+    {
+      "pane": 9007199254741001,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": "/synthetic/omp/sessions/2026-11-24T00-00-00-000Z_synthetic-session-2.jsonl",
+      "quiet_ms": 100,
+      "working": true
+    },
+    {
+      "pane": 9007199254741007,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": true,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    },
+    {
+      "pane": 9007199254741011,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": 0,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": true,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    },
+    {
+      "pane": 9007199254741015,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": 1,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": true,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    },
+    {
+      "pane": 9007199254741019,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": 1,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": false,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    },
+    {
+      "pane": 9007199254741023,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": null,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": true,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    },
+    {
+      "pane": 9007199254741031,
+      "program": "/synthetic/path",
+      "args": [
+        "synthetic"
+      ],
+      "cwd": "/synthetic/path",
+      "cols": 80,
+      "rows": 24,
+      "width": 640,
+      "height": 480,
+      "exited": 127,
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "keep_open": true,
+      "title": "synthetic",
+      "followed": false,
+      "omp_session_file": null,
+      "quiet_ms": 100,
+      "working": false
+    }
+  ],
+  "clients": [
+    {
+      "conn": 9007199254741033,
+      "window": "",
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "kind": "synthetic",
+      "since": 1
+    },
+    {
+      "conn": 9007199254741035,
+      "window": "",
+      "identity": {
+        "hops": [
+          {
+            "principal": "synthetic",
+            "method": "synthetic",
+            "from": "",
+            "host": "synthetic",
+            "user": "synthetic"
+          }
+        ]
+      },
+      "kind": "synthetic",
+      "since": 1
+    }
+  ]
+}
