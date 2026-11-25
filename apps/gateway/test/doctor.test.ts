@@ -7,6 +7,22 @@ import { HANG_DEADLINE_MS } from "./test-support.ts";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
+const baseCheckKeys = [
+  "config", "permissions", "daemon", "listenerLoopbackOnly", "loopbackTrustSound",
+  "serviceInstalled", "serviceActive", "tailscaleConnected", "serveMapping", "funnelDisabled",
+  "identityAllowed", "assets", "pwa", "securityHeaders", "relay", "discoveryReadable",
+  "sessionHealth", "compatibility",
+];
+
+async function withoutNetwork<T>(run: () => Promise<T>): Promise<T> {
+  const network = spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 503 }));
+  try {
+    return await run();
+  } finally {
+    network.mockRestore();
+  }
+}
+
 /**
  * The report is the operator contract: an unsafe topology or an unsupported OMP must stay visible
  * even when config declares trust. The version and tunnel probes isolate those inputs, while the
@@ -22,7 +38,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
   });
 
-  async function isolatedRoot(): Promise<string> {
+  async function isolatedRoot(overrides: Record<string, unknown> = {}): Promise<string> {
     const root = await mkdtemp(join(tmpdir(), "gateway-doctor-"));
     roots.push(root);
     process.env.HOME = join(root, "home");
@@ -38,6 +54,7 @@ describe("doctor reports mainline compatibility and discovery health", () => {
         http: { hostname: "127.0.0.1", port: 4399, publicOrigin: "https://gateway.example.ts.net" },
         auth: { mode: "tailscale-serve", allowedLogins: ["doctor@example.com"] },
         registry: { heartbeatSeconds: 10, ttlSeconds: 35, maxSessions: 10 },
+        ...overrides,
       })}\n`,
     );
     await chmod(configPath, 0o600);
@@ -48,8 +65,122 @@ describe("doctor reports mainline compatibility and discovery health", () => {
     process.env.XDG_CONFIG_HOME = join(root, "config");
     process.env.XDG_STATE_HOME = join(root, "state");
     process.env.XDG_RUNTIME_DIR = join(root, "run");
+    if (process.platform === "darwin") process.env.TMPDIR = join(root, "run");
     return root;
   }
+
+  test("starts independent probes before any completes without changing the report", async () => {
+    const coordinator = "https://home.example.ts.net";
+    process.env.PATH = await isolatedRoot({
+      http: { publicOrigin: "https://gateway.example.ts.net", trustedDashboardOrigins: [coordinator] },
+      tern: {},
+      fleet: { targets: [{ id: "peer", origin: "https://peer.example.ts.net", label: "Peer" }] },
+      notifications: { coordinators: [{ id: "home", origin: coordinator }], sources: ["peer"] },
+    });
+    await withoutNetwork(async () => {
+      const version = "omp/18.1.20\n";
+      const service = { installed: true, active: false };
+      const started = new Set<string>();
+      const allStarted = Promise.withResolvers<void>();
+      function holdProbe<T>(name: string, value: T) {
+        const gate = Promise.withResolvers<T>();
+        return {
+          run: () => {
+            started.add(name);
+            if (started.size === 3) allStarted.resolve();
+            return gate.promise;
+          },
+          release: () => gate.resolve(value),
+        };
+      }
+      const ternProbe = holdProbe("ternAvailable", true);
+      const versionProbe = holdProbe("ompVersion", version);
+      const serviceProbe = holdProbe("serviceStatus", service);
+      const release = () => {
+        serviceProbe.release();
+        versionProbe.release();
+        ternProbe.release();
+      };
+      const tunDevicePresent = () => true;
+      const running = runDoctorChecks({
+        ternAvailable: ternProbe.run,
+        ompVersion: versionProbe.run,
+        serviceStatus: serviceProbe.run,
+        tunDevicePresent,
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          allStarted.promise,
+          running,
+          new Promise<void>(resolve => { timer = setTimeout(resolve, HANG_DEADLINE_MS); }),
+        ]);
+        expect([...started].sort()).toEqual(["ompVersion", "serviceStatus", "ternAvailable"]);
+        release();
+        const report = await running;
+
+        const ternDone = Promise.withResolvers<void>();
+        const versionDone = Promise.withResolvers<void>();
+        const sequential = await runDoctorChecks({
+          ternAvailable: async () => { ternDone.resolve(); return true; },
+          ompVersion: async () => { await ternDone.promise; versionDone.resolve(); return version; },
+          serviceStatus: async () => { await versionDone.promise; return service; },
+          tunDevicePresent,
+        });
+        expect(report).toEqual(sequential);
+        expect(report.checks).toMatchObject({
+          config: true, ternAvailable: true, notificationGrantsHealthy: true, fleetNotificationsHealthy: true,
+          compatibility: true, serviceInstalled: true, serviceActive: false,
+        });
+        expect(Object.keys(report.checks)).toEqual([
+          ...baseCheckKeys, "ternAvailable", "notificationGrantsHealthy", "fleetNotificationsHealthy",
+        ]);
+      } finally {
+        clearTimeout(timer);
+        release();
+        await running.catch(() => undefined);
+      }
+    });
+  });
+
+  test("keeps the localhost report keys and unrelated results when service status rejects", async () => {
+    process.env.PATH = await isolatedRoot({
+      http: { port: 4399, publicOrigin: "http://127.0.0.1:4399" },
+      auth: { mode: "dev-localhost" },
+    });
+    await withoutNetwork(async () => {
+      const ompVersion = async () => "18.1.20";
+      const report = await runDoctorChecks({
+        ompVersion,
+        serviceStatus: async () => ({ installed: true, active: true }),
+      });
+      expect(report.checks).toMatchObject({
+        config: true, compatibility: true, serviceInstalled: true, serviceActive: true,
+        loopbackTrustSound: true, tailscaleConnected: true, serveMapping: true, identityAllowed: true,
+      });
+
+      const failed = await runDoctorChecks({
+        ompVersion,
+        serviceStatus: async () => { throw new Error("synthetic service status failure"); },
+      });
+      expect(failed).toEqual({
+        ...report,
+        checks: { ...report.checks, serviceInstalled: false, serviceActive: false },
+      });
+      expect(Object.keys(failed.checks)).toEqual(baseCheckKeys);
+    });
+  });
+
+  test("propagates an uncaught OMP version rejection even with a caught service failure", async () => {
+    process.env.PATH = await isolatedRoot();
+    await withoutNetwork(async () => {
+      const error = new Error("synthetic OMP version failure");
+      await expect(runDoctorChecks({
+        ompVersion: async () => { throw error; },
+        serviceStatus: async () => { throw new Error("synthetic service status failure"); },
+      })).rejects.toBe(error);
+    });
+  });
 
   test.skipIf(process.platform === "win32")("kills a hung installed OMP version probe within five seconds", async () => {
     const root = await realpath(await isolatedRoot()), executable = join(root, "omp"), pidPath = join(root, "probe-pid");

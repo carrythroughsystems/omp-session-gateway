@@ -328,6 +328,15 @@ async function publicAsset(config: GatewayConfig, path: string, tailscaleIp?: st
   return await publicResponse(config, path, tailscaleIp);
 }
 
+function publicProbeResponses(config: GatewayConfig, tailscaleIp?: string) {
+  return Promise.all([
+    publicSessions(config, tailscaleIp),
+    publicAsset(config, "/", tailscaleIp),
+    publicAsset(config, "/manifest.webmanifest", tailscaleIp),
+    publicAsset(config, "/service-worker.js", tailscaleIp),
+  ]);
+}
+
 async function localAssetsPresent(): Promise<boolean> {
   const webRoot = fileURLToPath(new URL("../../web/dist/", import.meta.url));
   try {
@@ -422,6 +431,20 @@ async function relayReachable(): Promise<boolean> {
   }
 }
 
+async function probeDiscoveryDirectory(config: GatewayConfig): Promise<boolean> {
+  // The gateway owns no endpoint now; what must stay sound is its read access to OMP's own
+  // discovery directory. A symlinked or foreign-owned directory is a real permissions finding.
+  return new OmpHostReader({
+    directory: config.omp.discoveryDir,
+    timeoutMs: config.omp.queryTimeoutMs,
+  }).directoryUsable();
+}
+
+function settledValue<T>(probe: PromiseSettledResult<T>): T {
+  if (probe.status === "rejected") throw probe.reason;
+  return probe.value;
+}
+
 export async function runDoctorChecks(
   options: {
     /**
@@ -474,60 +497,85 @@ export async function runDoctorChecks(
     return { service: "omp-session-gateway", checks };
   }
 
-  if (config.tern !== undefined) {
-    try { checks.ternAvailable = await (options.ternAvailable ?? probeTernAvailability)(config); }
-    catch { checks.ternAvailable = false; }
+  async function checkTern(): Promise<boolean> {
+    try { return await (options.ternAvailable ?? probeTernAvailability)(config); }
+    catch { return false; }
   }
-  if (config.notifications?.coordinators?.length) {
-    checks.notificationGrantsHealthy = await notificationGrantsHealthy(config);
+  async function readToken(): Promise<string | undefined> {
+    try { return await loadReadinessToken(config); }
+    catch { return undefined; }
   }
-  if (config.notifications?.sources?.length) {
-    checks.fleetNotificationsHealthy = await fleetCoordinatorStateHealthy(config.paths.stateDir);
+  // A service manager that cannot be read fails both service checks without costing the rest of the report.
+  async function checkService(): Promise<UserServiceStatus> {
+    try {
+      const service = await (options.serviceStatus ?? userServiceStatus)(config);
+      return { installed: service.installed, active: service.active };
+    } catch {
+      return { installed: false, active: false };
+    }
   }
-  checks.assets = await localAssetsPresent();
-  checks.compatibility = await ompVersionSupported(options.ompVersion ?? installedOmpVersion);
-  let readinessToken: string | undefined;
-  try {
-    readinessToken = await loadReadinessToken(config);
-    checks.permissions = true;
-  } catch {
-    checks.permissions = false;
-  }
+
+  const ternEnabled = config.tern !== undefined;
+  const grantsEnabled = Boolean(config.notifications?.coordinators?.length);
+  const fleetEnabled = Boolean(config.notifications?.sources?.length);
+  const tailscaleMode = config.auth.mode === "tailscale-serve";
+  const ternProbe = ternEnabled ? checkTern() : false;
+  const grantsProbe = grantsEnabled ? notificationGrantsHealthy(config) : false;
+  const fleetProbe = fleetEnabled ? fleetCoordinatorStateHealthy(config.paths.stateDir) : false;
+  // The Windows helper queues ACL inspections before starting each reply deadline. Read the
+  // optional files before token loading reapplies their parent ACLs; a configured discovery path
+  // can also sit under those directories. On POSIX, creating a missing directory changes no ACL.
+  const windows = process.platform === "win32";
+  const tokenProbe = windows ? Promise.allSettled([ternProbe, grantsProbe, fleetProbe]).then(readToken) : readToken();
+  const discoveryProbe = windows ? tokenProbe.then(() => probeDiscoveryDirectory(config)) : probeDiscoveryDirectory(config);
+
+  const [tern, grants, fleet, assets, compatibility, token, discovery, service, relay, funnel, status, serve, local] =
+    await Promise.allSettled([
+      ternProbe,
+      grantsProbe,
+      fleetProbe,
+      localAssetsPresent(),
+      ompVersionSupported(() => (options.ompVersion ?? installedOmpVersion)()),
+      tokenProbe,
+      discoveryProbe,
+      checkService(),
+      relayReachable(),
+      commandJson(["tailscale", "funnel", "status", "--json"]),
+      tailscaleMode ? commandJson(["tailscale", "status", "--json"]) : undefined,
+      tailscaleMode ? commandJson(["tailscale", "serve", "status", "--json"]) : undefined,
+      tailscaleMode ? undefined : publicProbeResponses(config),
+    ]);
+
+  // Consume in the former order: optional keys keep their positions and unexpected rejections
+  // keep their precedence, regardless of which probe completed first.
+  if (ternEnabled) checks.ternAvailable = settledValue(tern);
+  if (grantsEnabled) checks.notificationGrantsHealthy = settledValue(grants);
+  if (fleetEnabled) checks.fleetNotificationsHealthy = settledValue(fleet);
+  checks.assets = settledValue(assets);
+  checks.compatibility = settledValue(compatibility);
+  const readinessToken = settledValue(token);
+  checks.permissions = readinessToken !== undefined;
+  // Start the short loopback deadline only after the subprocess-backed probes have settled.
   checks.daemon = readinessToken !== undefined && (await gatewayReady(config, readinessToken));
   checks.listenerLoopbackOnly = checks.daemon && ["127.0.0.1", "::1"].includes(config.http.hostname);
-  // The gateway owns no endpoint now; what must stay sound is its read access to OMP's own
-  // discovery directory. A symlinked or foreign-owned directory is a real permissions finding.
-  checks.discoveryReadable = await new OmpHostReader({
-    directory: config.omp.discoveryDir,
-    timeoutMs: config.omp.queryTimeoutMs,
-  }).directoryUsable();
+  checks.discoveryReadable = settledValue(discovery);
   if (!checks.discoveryReadable) checks.permissions = false;
 
-  // A service manager that cannot be read fails both service checks without costing the rest of the report.
-  try {
-    const service = await (options.serviceStatus ?? userServiceStatus)(config);
-    checks.serviceInstalled = service.installed;
-    checks.serviceActive = service.active;
-  } catch {
-    checks.serviceInstalled = false;
-    checks.serviceActive = false;
-  }
-  checks.relay = await relayReachable();
-  const funnel = await commandJson(["tailscale", "funnel", "status", "--json"]);
-  checks.funnelDisabled = funnel !== undefined && funnelConfigurationDisabled(funnel, config);
+  const { installed, active } = settledValue(service);
+  checks.serviceInstalled = installed;
+  checks.serviceActive = active;
+  checks.relay = settledValue(relay);
+  const funnelStatus = settledValue(funnel);
+  checks.funnelDisabled = funnelStatus !== undefined && funnelConfigurationDisabled(funnelStatus, config);
 
-  if (config.auth.mode === "dev-localhost") {
+  const localhostResponses = settledValue(local);
+  if (localhostResponses !== undefined) {
     checks.tailscaleConnected = true;
     checks.serveMapping = true;
     checks.identityAllowed = true;
     // No identity header is believed in this mode, so there is no loopback trust to be unsound.
     checks.loopbackTrustSound = true;
-    const [sessions, root, manifest, worker] = await Promise.all([
-      publicSessions(config),
-      publicAsset(config, "/"),
-      publicAsset(config, "/manifest.webmanifest"),
-      publicAsset(config, "/service-worker.js"),
-    ]);
+    const [sessions, root, manifest, worker] = localhostResponses;
     checks.sessionHealth =
       sessions !== undefined && sessions.sessions.every(session => Number.isFinite(Date.parse(session.lastSeenAt)));
     checks.pwa = root?.ok === true && manifest?.ok === true && worker?.ok === true;
@@ -535,18 +583,11 @@ export async function runDoctorChecks(
     return { service: "omp-session-gateway", checks };
   }
 
-  const [status, serve] = await Promise.all([
-    commandJson(["tailscale", "status", "--json"]),
-    commandJson(["tailscale", "serve", "status", "--json"]),
-  ]);
-  const tailscaleIp = tailscaleSelfIp(status);
-  const [sessions, root, manifest, worker] = await Promise.all([
-    publicSessions(config, tailscaleIp),
-    publicAsset(config, "/", tailscaleIp),
-    publicAsset(config, "/manifest.webmanifest", tailscaleIp),
-    publicAsset(config, "/service-worker.js", tailscaleIp),
-  ]);
-  checks.tailscaleConnected = property(status, "BackendState") === "Running";
+  const tailscaleStatus = settledValue(status);
+  const serveStatus = settledValue(serve);
+  const tailscaleIp = tailscaleSelfIp(tailscaleStatus);
+  const [sessions, root, manifest, worker] = await publicProbeResponses(config, tailscaleIp);
+  checks.tailscaleConnected = property(tailscaleStatus, "BackendState") === "Running";
   // The bind address is necessary but not sufficient. Userspace-mode tailscaled forwards inbound
   // tailnet connections to localhost, so the listener is remotely reachable and the caller arrives as
   // a loopback peer whose identity header would be believed. Report that as its own finding, and
@@ -564,7 +605,7 @@ export async function runDoctorChecks(
   if (checks.tailscaleConnected && !tailnetAddressIsLocallyBound(tailscaleIp)) {
     checks.listenerLoopbackOnly = false;
   }
-  checks.serveMapping = serveConfigurationMatches(serve, config);
+  checks.serveMapping = serveConfigurationMatches(serveStatus, config);
   checks.identityAllowed = sessions !== undefined;
   checks.sessionHealth =
     sessions !== undefined && sessions.sessions.every(session => Number.isFinite(Date.parse(session.lastSeenAt)));
