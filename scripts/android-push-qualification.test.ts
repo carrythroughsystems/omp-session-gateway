@@ -130,6 +130,7 @@ function fake(options: FakeOptions = {}) {
       coverage: async () => ({ selected: remote.selected, state: options.fleetFailure === "enrollment" ? "pending" :
         remote.revoked ? "unauthorized" : remote.online ? "current" : "stale", covered: remote.online && !remote.revoked }),
       armBadgeObserver: async () => {},
+      restartClearTransport: async () => {},
       restartReplacement: async (previous, current) => restartClears.has(previous.ask!.requestId) &&
         current.ask?.requestId === primarySnapshot()?.ask?.requestId && shown === "attention",
       observeBadge: async () => badgeNow(),
@@ -2002,6 +2003,8 @@ test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing o
     if (args[0] === "coordinator-up") stopped = false;
     await control(...args);
   };
+  let transportReads = 0;
+  host.runtime.fleet.restartClearTransport = async () => { transportReads++; };
   const error = await runAndroidPush(host.input).catch(error => error);
   expect(error).toBeInstanceOf(QualificationFailure);
   expect(error.evidence.step).toBe(phase);
@@ -2009,11 +2012,15 @@ test.each(["race", "restart"] as const)("fleet %s refuses to conceal a missing o
   expect(events.filter(event => event === "ask")).toHaveLength(1);
   expect(events.slice(0, 2)).toEqual(["ask", "answer"]);
   expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+  // Play Services is read once, and only after the restart clear has already failed.
+  expect(transportReads).toBe(scenario === "restart" ? 1 : 0);
 });
 
 test.each([undefined, "restart-no-realert", "restart-duplicate", "restart-second-realert", "restart-remote-repeat"] as const)(
   "restart requires exactly one local replacement and no remote repeat (%s)", async fleetFailure => {
     const host = fake(fleetFailure === undefined ? {} : { fleetFailure });
+    let transportReads = 0;
+    host.runtime.fleet.restartClearTransport = async () => { transportReads++; };
     const result = await runAndroidPushDevelopmentStep(host.input, "coordinator-restart").catch(error => error);
     if (fleetFailure === undefined) {
       expect(result.passed).toBe(true);
@@ -2025,6 +2032,8 @@ test.each([undefined, "restart-no-realert", "restart-duplicate", "restart-second
       expect(result.evidence.step).toBe("fleet_restart_verified");
     }
     expect(androidPushNeedsCleanup(host.checkpoints.at(-1))).toBe(false);
+    // A cleared remote alert never reads Play Services: its dump thaws every frozen app.
+    expect(transportReads).toBe(0);
   });
 
 test("restart stability observes beyond the coordinator's failed-send cooldown", async () => {

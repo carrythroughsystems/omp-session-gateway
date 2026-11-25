@@ -742,6 +742,17 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
     const ledger = await restartLedger(session), before = restart.before;
     const stableCounts = ledger !== undefined && before !== undefined &&
       ledger.recipients === before.recipients && ledger.grants === before.grants && ledger.epoch > before.epoch;
+    return { sinceCoordinatorUpMs: Math.round(runtime.now() - restart.upAt),
+      ledgerReadFailed: ledger === undefined, ledgerBaselinePresent: before?.requestOutstanding === true,
+      ledgerCountsStable: stableCounts, ledgerRequestOutstanding: ledger?.requestOutstanding === true,
+      ledgerClearAccepted: stableCounts && before?.requestOutstanding === true && ledger?.requestOutstanding === false,
+      ledgerOutstanding: ledger?.outstanding ?? -1 };
+  };
+  // `dumpsys activity service` lifts Android's freezer for every cached app while it runs. Read
+  // Play Services once, after a restart clear has already failed, never while the phase observes.
+  const restartClearTransport = async (): Promise<void> => {
+    const restart = restartClear;
+    if (phase !== "fleet_restart_verified" || restart?.upAt === undefined) return;
     let gcmReadFailed = true, gcmConnected = false, gcmWifi = false, gcmReceiveAgeMs = -1;
     try {
       const dump = await boundedAdb(await selectDevice(),
@@ -756,11 +767,9 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
       if (last !== undefined && now !== undefined) gcmReceiveAgeMs = Math.round(Math.max(0, now - last < -1 ? now - last + 86400 : now - last) * 1000);
       gcmReadFailed = false; gcmConnected = transport.connected === true; gcmWifi = transport.wifi;
     } catch (error) { rethrowPushSafetyFailure(error); }
-    return { sinceCoordinatorUpMs: Math.round(runtime.now() - restart.upAt),
-      ledgerReadFailed: ledger === undefined, ledgerBaselinePresent: before?.requestOutstanding === true,
-      ledgerCountsStable: stableCounts, ledgerRequestOutstanding: ledger?.requestOutstanding === true,
-      ledgerClearAccepted: stableCounts && before?.requestOutstanding === true && ledger?.requestOutstanding === false,
-      ledgerOutstanding: ledger?.outstanding ?? -1, gcmReadFailed, gcmConnected, gcmWifi, gcmReceiveAgeMs };
+    // Closed scalar diagnostics only; no receipt text, network identity or endpoint.
+    console.log("android-fleet-transport: " + JSON.stringify({ phase, sinceCoordinatorUpMs: Math.round(runtime.now() - restart.upAt),
+      gcmReadFailed, gcmConnected, gcmWifi, gcmReceiveAgeMs }));
   };
   const worker = async <T>(operation: "armBadgeObserver" | "observeBadge" | "observe" | "notificationCleared" | "restartReplacement" | "restoreBadgeObserver" | "replay",
     expression: string, readOnly = false): Promise<T> => {
@@ -970,23 +979,28 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         const started = performance.now(), observer = fleetObserver;
         // In flight before the push that thaws Chrome, so the worker answers inside that thaw.
         // Interval ticks advance only while the worker runs: a frozen process cannot spend the
-        // budget, and an unpatched badge observer ends the wait at once.
+        // budget. A worker without the observer was restarted after it was armed: the push it
+        // handled ran unobserved, so the wait fails typed instead of reading what cannot appear.
         const pending = (async () => {
           checkExecution();
           if (observer === undefined) throw new Error("fleet badge expectation requires the held worker observer");
           try {
-            const answer = await evaluation("worker/expectBadge", () => observer.evaluate<{ matched: boolean; observation: FleetBadgeObservation | null }>(`(async () => {
+            const answer = await evaluation("worker/expectBadge", () => observer.evaluate<{ matched: boolean; armed: boolean; observation: FleetBadgeObservation | null }>(`(async () => {
               const state = self.__ompQualificationBadge, count = ${JSON.stringify(count)}, complete = ${JSON.stringify(complete)};
+              if (!state) return { matched: false, armed: false, observation: null };
               const matches = () => state.observation !== null && state.observation.count === count && (count > 0 || state.observation.complete === complete);
-              if (!state || matches()) return { matched: !!state, observation: state?.observation ?? null };
+              if (matches()) return { matched: true, armed: true, observation: state.observation };
               const { promise, resolve } = Promise.withResolvers();
               let ticks = 0;
               const timer = self.setInterval(() => {
                 const detached = self.__ompQualificationBadge !== state, matched = !detached && matches();
-                if (matched || detached || ++ticks >= ${BADGE_EXPECTATION_TICKS}) { self.clearInterval(timer); resolve({ matched, observation: state.observation }); }
+                if (matched || detached || ++ticks >= ${BADGE_EXPECTATION_TICKS}) { self.clearInterval(timer); resolve({ matched, armed: !detached, observation: state.observation }); }
               }, 100);
               return await promise;
             })()`, BADGE_EXPECTATION_TIMEOUT_MS));
+            if (answer.armed !== true) throw new QualificationFailure({ id: nextFailureId(), lane: "androidPush", step: phase, class: "harness", reason: "invalid_evidence",
+              operation: "read_only", elapsedMs: Math.round(performance.now() - started), observations: {} },
+              { cause: new Error("Fleet badge observer lost: the worker restarted after it was armed") });
             return { matched: answer.matched === true, ...(answer.observation === null ? {} : { observation: answer.observation }) };
           } catch (error) {
             if (error instanceof AndroidBrowserCleanupError) throw pushBrowserCleanupFailure(error, nextFailureId);
@@ -1001,6 +1015,7 @@ export function createAndroidPushRuntime(identity: Pick<AndroidPushIdentity, "or
         pending.catch(() => {});
         return { settle: () => pending };
       },
+      restartClearTransport,
       async restartReplacement(previous, current) {
         if (remoteIds.has(previous.instanceId) || previous.instanceId !== current.instanceId ||
           previous.generation !== current.generation || !current.inputRequired || previous.ask === undefined ||
