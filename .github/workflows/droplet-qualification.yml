@@ -25,7 +25,9 @@
 # returns ever stops matching the key we generated, this job stops before a droplet exists.
 
 name: Droplet Linux qualification
-run-name: Stable qualification ${{ inputs.qualification_id || github.run_id }}
+# The orchestrator finds its run by the exact "Stable qualification <id>" title; a credentials-only
+# probe gets a different one so it can never be taken for a qualification run.
+run-name: ${{ inputs.credentials_only && 'Credential preflight' || 'Stable qualification' }} ${{ inputs.qualification_id || github.run_id }}
 
 on:
   # Require an exact chosen candidate. Never silently select a release or
@@ -56,6 +58,13 @@ on:
         description: DigitalOcean size slug; mainline OMP qualification reserves two vCPUs and 8 GiB RAM
         required: false
         default: s-2vcpu-8gb-amd
+      credentials_only:
+        description: >-
+          Stop after the secret, candidate and Tailscale key preflights. Registers no SSH key and
+          creates no droplet, so it proves the hosted credentials without spending a candidate.
+        type: boolean
+        required: false
+        default: false
   # Deliberately no `pull_request` and no `push`. This job spends money and needs three long-lived
   # secrets. A fork's pull request receives none of them, so it would fail for a confusing reason, and
   # more importantly a pull request must never be able to run an arbitrary edit of this script against
@@ -303,7 +312,10 @@ jobs:
               "The persistence lane reboots the droplet twice; an ephemeral node can be removed while it is offline, taking the Serve mapping and node identity with it."
           fi
 
+      # Everything from here to the lanes is skipped in a credentials-only probe. Teardown still runs
+      # and finds nothing: it destroys a droplet only when `provision` executed in this job.
       - name: Refuse to adopt a droplet this run did not create
+        if: ${{ !inputs.credentials_only }}
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
         run: |
@@ -325,6 +337,7 @@ jobs:
           printf 'no droplet named %s exists; this run starts clean\n' "$OMP_QUAL_NAME"
 
       - name: Create an ephemeral SSH key and register it with DigitalOcean
+        if: ${{ !inputs.credentials_only }}
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           SSH_IDENTITY: ${{ runner.temp }}/omp-qual-ci
@@ -364,6 +377,7 @@ jobs:
 
       - name: Provision the droplet and join it to the tailnet
         id: provision
+        if: ${{ !inputs.credentials_only }}
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           # Only this step needs the auth key: `qualify` never touches it and teardown must not.
@@ -371,6 +385,7 @@ jobs:
         run: ./scripts/provision-linux-qual.sh provision
 
       - name: Run the qualification lanes
+        if: ${{ !inputs.credentials_only }}
         env:
           DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
           # See the preflight step: `GITHUB_TOKEN` authenticates `gh` here while leaving `GH_TOKEN`

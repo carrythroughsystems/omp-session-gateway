@@ -737,6 +737,20 @@ into a paid droplet.
 | `TS_AUTHKEY` | Tailscale admin console → Settings → Keys → Generate auth key | the `provision` step only | Must carry `tag:omp-session-gateway`, be pre-approved if your tailnet requires device approval, and **not** be ephemeral. See [section 3](#3-prerequisites); the reasoning there is unchanged. |
 | `TS_API_KEY` | the same Keys page, as an API access token | the teardown step only | Without it `destroy` logs the node out but cannot delete the tailnet machine record, and logged-out records accumulate until Tailscale starts appending `-1`, `-2`, `-3` to the node name. The auth-key preflight also uses it to read the key's expiry. |
 
+To prove all three without creating anything, dispatch the workflow with `credentials_only=true` and
+a published candidate and predecessor:
+
+```sh
+gh workflow run droplet-qualification.yml --ref main -f credentials_only=true \
+  -f release_tag=vX.Y.Z-prealpha.N -f previous_tag=vX.Y.Z
+```
+
+The run is titled `Credential preflight <run id>`. It performs the secret, candidate and Tailscale
+key preflights and stops: no SSH key is registered and no droplet is created. Tailscale caps both
+key kinds at ninety days, so run it before every campaign. The orchestrator's `--preflight` cannot
+read these secrets, and an expired `TS_API_KEY` otherwise fails the Debian lane only after the
+campaign has started (`v0.13.0-prealpha.1`, run `45566894901`).
+
 `GITHUB_TOKEN` is the automatic per-job token; there is nothing to configure. It is deliberately
 exported as `GITHUB_TOKEN` and not as `GH_TOKEN`: `gh` accepts either, but this script forwards
 `GH_TOKEN` to the droplet so it can verify attestations online. Leaving `GH_TOKEN` unset selects the
