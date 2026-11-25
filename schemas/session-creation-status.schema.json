@@ -128,6 +128,7 @@
         "error": {
           "enum": [
             "adoption_timeout",
+            "command_exited",
             "correlation_ambiguous",
             "control_unavailable",
             "interrupted"

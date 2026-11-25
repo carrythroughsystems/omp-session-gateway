@@ -21,7 +21,7 @@ const realReceipt = `{
   "block": 515396075522
 }
 `;
-async function fake(mode = "success", receipt = realReceipt) {
+async function fake(mode = "success", receipt = realReceipt, inspection = inspect()) {
   const root = await mkdtemp(join(tmpdir(), "tern-boundary-")); roots.push(root);
   const executable = join(root, "tern");
   await writeFile(executable, `#!${process.execPath}\nimport * as fs from 'node:fs/promises';
@@ -37,7 +37,7 @@ else if(mode === 'overflow') process.stdout.write('x'.repeat(1100000));
 else if(mode === 'malformed') console.log('{');
 else if(mode === 'duplicate') console.log('{"block":1,"block":2}');
 else if(mode === 'remote') console.log('{"block":72057594037927936}');
-else if(process.argv[2] === 'inspect') console.log(${JSON.stringify(inspect())});
+else if(process.argv[2] === 'inspect') console.log(${JSON.stringify(inspection)});
 else process.stdout.write(${JSON.stringify(receipt)});\n`);
   await chmod(executable, 0o700);
   const profile: TernProfile = { id: "omp", label: "Synthetic profile", argv: [process.execPath, "$(SYNTHETIC_ARG_SECRET)", "literal;argument"],
@@ -187,6 +187,38 @@ describe("lossless bounded Tern metadata", () => {
       expect(sessionBasenameMatches("2026-10-24T00-00-00-000Z_session-one.jsonl", id)).toBe(false);
     }
     expect(sessionBasenameMatches("session-one.txt", "session-one")).toBe(false);
+  });
+});
+
+describe("created block exit metadata", () => {
+  function inspection(blocks: string, createdBlockId?: string) {
+    return parseTernInspection(bytes(`{"sessions":[{"tabs":[{"blocks":[${blocks}]}]}],"panes":[]}`), createdBlockId);
+  }
+  test.skipIf(process.platform === "win32")("the CLI reports exit only when asked about the created block", async () => {
+    const fixture = await fake("success", realReceipt, '{"sessions":[{"tabs":[{"blocks":[{"id":42,"exited":0}]}]}],"panes":[]}');
+    const cli = new TernCli(fixture.executable, { inspect: HANG_DEADLINE_MS, create: HANG_DEADLINE_MS });
+    const signal = new AbortController().signal;
+    expect(await cli.inspect(fixture.profile, signal)).toEqual({ blocks: ["42"], panes: [] });
+    expect(await cli.inspect(fixture.profile, signal, "42")).toMatchObject({ commandExited: true });
+  });
+  test("projects only the exit fact of the single requested local block", () => {
+    const id = "9007199254740993", block = `{"id":${id},"exited":-12345}`;
+    expect(inspection(block)).not.toHaveProperty("commandExited");
+    const selected = inspection(block, id);
+    expect(selected.commandExited).toBe(true);
+    expect(JSON.stringify(selected)).not.toContain("12345");
+    expect(inspection(block, "9007199254740992").commandExited).toBe(false);
+    const duplicate = `{"id":${id},"exited":null}`;
+    for (const blocks of [`${block},${duplicate}`, `${duplicate},${block}`, `${block},${block}`]) {
+      expect(inspection(blocks, id).commandExited).toBe(false);
+    }
+    expect(inspection('{"id":72057594037927936,"exited":0}', "72057594037927936").commandExited).toBe(false);
+  });
+  test("treats non-integer lexemes and unknown shapes as no exit, not an invalid inspection", () => {
+    for (const exited of ["1.0", "1e0", "0.2", '"1"', "{}", "[]", "true", "null"]) {
+      expect(inspection(`{"id":42,"exited":${exited}}`, "42").commandExited).toBe(false);
+    }
+    expect(inspection('{"id":42}', "42").commandExited).toBe(false);
   });
 });
 

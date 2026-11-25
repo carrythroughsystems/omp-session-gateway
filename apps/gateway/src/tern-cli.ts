@@ -114,10 +114,14 @@ export function localTernId(value: Json | undefined): string {
 export interface TernInspection {
   readonly blocks: readonly string[];
   readonly panes: readonly { readonly paneId: string; readonly sessionBasename?: string }[];
+  /** Present only when inspecting for the command of a specific created block. */
+  readonly commandExited?: boolean;
 }
-export function parseTernInspection(bytes: Uint8Array): TernInspection {
+export function parseTernInspection(bytes: Uint8Array, createdBlockId?: string): TernInspection {
   const root = object(parseTernJson(bytes, INSPECTION_JSON_BOUNDS));
   const blocks: string[] = [];
+  let createdBlock: { [key: string]: Json } | undefined;
+  let matches = 0;
   let tabs = 0;
   for (const session of array(root.sessions, 64)) {
     const sessionTabs = array(object(session).tabs, 256);
@@ -125,10 +129,15 @@ export function parseTernInspection(bytes: Uint8Array): TernInspection {
     for (const tab of sessionTabs) {
       for (const block of array(object(tab).blocks, 4096)) {
         // Remote panes may coexist in an inspection, but are never local candidates.
-        const raw = object(block).id;
-        if (!(raw instanceof NumericLexeme) || !/^(?:0|[1-9][0-9]*)$/u.test(raw.value) || BigInt(raw.value) > 0xffffffffffffffffn) return invalid();
-        blocks.push(BigInt(raw.value).toString());
+        const metadata = object(block);
+        const id = unsignedTernId(metadata.id);
+        const blockId = id.toString();
+        blocks.push(blockId);
         if (blocks.length > 4096) return invalid();
+        if (blockId === createdBlockId && id >> 56n === 0n) {
+          createdBlock = metadata;
+          matches++;
+        }
       }
     }
   }
@@ -142,7 +151,9 @@ export function parseTernInspection(bytes: Uint8Array): TernInspection {
     if (typeof file !== "string" || !isAbsolute(file) || file.includes("\0") || Buffer.byteLength(file) > 4096) return invalid();
     return { paneId, sessionBasename: basename(file) };
   });
-  return { blocks, panes };
+  if (createdBlockId === undefined) return { blocks, panes };
+  const exited = matches === 1 ? createdBlock?.exited : undefined;
+  return { blocks, panes, commandExited: exited instanceof NumericLexeme && /^-?[0-9]+$/u.test(exited.value) };
 }
 export function matchingTernBasename(inspection: TernInspection, blockId: string): string | undefined {
   if (!/^(?:0|[1-9][0-9]*)$/u.test(blockId) || BigInt(blockId) >> 56n !== 0n) return undefined;
@@ -162,7 +173,7 @@ export interface TernSpawnTime {
 export type TernCreateResult = { readonly kind: "not_started" } | { readonly kind: "unknown" } |
   { readonly kind: "started"; readonly blockId: string; readonly spawnedAt: TernSpawnTime };
 export interface TernCliBoundary {
-  inspect(profile: TernProfile, signal: AbortSignal): Promise<TernInspection | undefined>;
+  inspect(profile: TernProfile, signal: AbortSignal, createdBlockId?: string): Promise<TernInspection | undefined>;
   createTab(copy: TernWorkingCopy, profile: TernProfile, signal: AbortSignal): Promise<TernCreateResult>;
 }
 
@@ -228,12 +239,12 @@ export class TernCli implements TernCliBoundary {
       this.#busy = false;
     }
   }
-  async inspect(profile: TernProfile, signal: AbortSignal): Promise<TernInspection | undefined> {
+  async inspect(profile: TernProfile, signal: AbortSignal, createdBlockId?: string): Promise<TernInspection | undefined> {
     const args = ["inspect", "--json"];
     if (this.window !== undefined) args.push("--window", this.window);
     const result = await this.#run(args, profile, signal, 1024 * 1024, this.timeouts.inspect);
     if (result.kind !== "output") return undefined;
-    try { return parseTernInspection(result.bytes); } catch { return undefined; }
+    try { return parseTernInspection(result.bytes, createdBlockId); } catch { return undefined; }
   }
   async createTab(copy: TernWorkingCopy, profile: TernProfile, signal: AbortSignal): Promise<TernCreateResult> {
     let argv: string[];

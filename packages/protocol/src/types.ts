@@ -51,7 +51,7 @@ export type SessionCreationUnavailableReason =
   | "not_configured" | "tern_unavailable" | "configuration_unavailable" | "ledger_unavailable";
 export const SESSION_CREATION_ERRORS = {
   failed: ["preflight_failed", "spawn_failed", "interrupted"],
-  started_unavailable: ["adoption_timeout", "correlation_ambiguous", "control_unavailable", "interrupted"],
+  started_unavailable: ["adoption_timeout", "command_exited", "correlation_ambiguous", "control_unavailable", "interrupted"],
   outcome_unknown: ["launch_outcome_unknown", "interrupted"],
 } as const;
 export type SessionCreationError = typeof SESSION_CREATION_ERRORS[keyof typeof SESSION_CREATION_ERRORS][number];

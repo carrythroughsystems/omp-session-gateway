@@ -387,7 +387,7 @@ Returns committed owner-scoped status for one creation operation without invokin
 | `accepted`, `launching`, `awaiting_omp` | None | `session`, `error` |
 | `ready` | `session: { instanceId, generation }` | `error` |
 | `failed` | `error: "preflight_failed" \| "spawn_failed" \| "interrupted"` | `session` |
-| `started_unavailable` | `error: "adoption_timeout" \| "correlation_ambiguous" \| "control_unavailable" \| "interrupted"` | `session` |
+| `started_unavailable` | `error: "adoption_timeout" \| "command_exited" \| "correlation_ambiguous" \| "control_unavailable" \| "interrupted"` | `session` |
 | `outcome_unknown` | `error: "launch_outcome_unknown" \| "interrupted"` | `session` |
 
 - Ownership binds to the normalized authorized identity rather than `Origin`, so the same identity can read status from another trusted dashboard.
@@ -407,7 +407,7 @@ Every state transition is durably written and `fsync`-committed to `<stateDir>/s
 | `launching` | `failed` | `spawn_failed` when OS process creation fails before a child exists. |
 | `launching` | `outcome_unknown` | `launch_outcome_unknown` on lost/bad stdout, non-zero exit, timeout, or baseline block; `interrupted` on restart. |
 | `awaiting_omp` | `ready` | Unique 1:1 Tern block/pane match and fresh **Control**-authorized OMP binding adopted. |
-| `awaiting_omp` | `started_unavailable` | `correlation_ambiguous`, `control_unavailable` (`view`-only at deadline), `adoption_timeout` (110 s), or `interrupted`. |
+| `awaiting_omp` | `started_unavailable` | `command_exited` as soon as inspection finds the created local block exactly once with an integer `exited`, before trying adoption; otherwise `correlation_ambiguous`, `control_unavailable` (`view`-only at deadline), `adoption_timeout` (110 s), or `interrupted`. |
 
 - Tern inspection JSON is limited to 1 MiB and depth 512 from root depth 0. Unused strings are
   bounded only by the document size; `omp_session_file` remains limited to 4,096 UTF-8 bytes.
