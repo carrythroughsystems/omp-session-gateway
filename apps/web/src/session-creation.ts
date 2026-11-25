@@ -438,7 +438,7 @@ export class SessionCreationController {
     const body = document.createElement("div");
     const { state } = status;
     const copy = state === "started_unavailable" && status.error === "command_exited"
-      ? "The command ended before OMP shared a session. Check its tab in Tern to see why."
+      ? "The command ended before its session was ready. Check its tab in Tern to see why."
       : state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here."
         : state === "outcome_unknown" ? "It may have started. Check Tern and the directory before creating another."
           : "The operation did not start a command. A new attempt needs another explicit Create action.";

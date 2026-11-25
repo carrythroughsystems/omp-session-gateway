@@ -217,7 +217,7 @@ for (const terminal of terminalStates) {
       await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
       await panel(page, "terminal");
       await expect(page.locator(".creation-terminal")).toContainText(terminal.error === "command_exited"
-        ? "The command ended before OMP shared a session. Check its tab in Tern to see why."
+        ? "The command ended before its session was ready. Check its tab in Tern to see why."
         : terminal.state === "failed" ? "did not start a command"
           : terminal.state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here"
             : "It may have started. Check Tern and the directory before creating another");
