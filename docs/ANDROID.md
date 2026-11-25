@@ -10,7 +10,7 @@ Run [`scripts/android-acceptance.ts`](../scripts/android-acceptance.ts) and its 
 
 Before running the lane, confirm these prerequisites:
 
-- Run `bun install --frozen-lockfile` with Bun `1.4.4` on `PATH`, and ensure local `adb` TCP port `9222` is free.
+- Run `bun install --frozen-lockfile` with Bun `1.4.5` on `PATH`, and ensure local `adb` TCP port `9222` is free.
 - Complete the one-time Tailscale (`com.tailscale.ipn`) Doze allowlist, connect Wi-Fi on the Pixel, turn off hotspot, USB, and Bluetooth tethering, and confirm the Pixel reaches the gateway's Tailscale Serve HTTPS origin (`$ORIGIN`, with no trailing slash or path, such as `https://host.example.ts.net`, and the Pixel's login in `auth.allowedLogins`); see [Device admission and one-time WebAPK setup](#device-admission-and-one-time-webapk-setup). Do Not Disturb may stay on during this lane.
 - Connect one USB-authorized Pixel (`adb devices`) and store its 4–16-digit numeric lock-screen PIN in macOS Keychain under the device's `adb` serial (keep `-w` last so `security` prompts interactively instead of placing the PIN in shell history or `argv`):
 
@@ -76,7 +76,7 @@ Its read-only `preflightAndroidPush` checks only the HTTPS origin, while `runAnd
 To run a local development check against an already installed macOS gateway without modifying or rotating it outside the restored fleet phases, confirm these prerequisites first:
 
 - `~/Library/LaunchAgents/omp-session-gateway.plist` is installed (with `StandardOutPath` and `StandardErrorPath` at `/dev/null`) in `tailscale-serve` mode behind a portless HTTPS `http.publicOrigin`, matches `$PUBLISHED_ARCHIVE`'s `version` and `sourceCommit` in `release-info.json`, has empty `fleet.targets` and `notifications`, has no `~/.local/state/omp-session-gateway/fleet-notifications.json`, and leaves Serve port `10443` and loopback port `14318` free.
-- Workspace dependencies are installed (`bun install --frozen-lockfile`) with Bun `1.4.4` on `PATH`, the host has `python3` with `os.forkpty` and the pinned stock OMP binary or `dist/cli.js` (`OMP_PUSH_FIXTURE_BINARY` in [`scripts/android-push-runtime.ts`](../scripts/android-push-runtime.ts), matching `UPSTREAM.lock.json`), and the Pixel satisfies [Device admission and one-time WebAPK setup](#device-admission-and-one-time-webapk-setup) (including the USB/Keychain PIN above).
+- Workspace dependencies are installed (`bun install --frozen-lockfile`) with Bun `1.4.5` on `PATH`, the host has `python3` with `os.forkpty` and the pinned stock OMP binary or `dist/cli.js` (`OMP_PUSH_FIXTURE_BINARY` in [`scripts/android-push-runtime.ts`](../scripts/android-push-runtime.ts), matching `UPSTREAM.lock.json`), and the Pixel satisfies [Device admission and one-time WebAPK setup](#device-admission-and-one-time-webapk-setup) (including the USB/Keychain PIN above).
 
 1. Run the full development matrix, or pass `development-step` with one step name (`fleet-identity`, `legacy-head-identity`, `coordinator-restart`, `revocation`, `fleet-sinks`, `fleet-restoration`, or `legacy-tail`; every step runs `fleet_enrolled` first, `fleet-identity` adds `stale_taps_verified` and the three `fleet_*_verified` detail phases, `legacy-head-identity` runs the nine local head phases plus those three detail phases, and `legacy-tail` restores `fleet` before the six tail phases):
 
@@ -124,7 +124,7 @@ Complete the persistent equipment steps once per Pixel and origin (with the USB-
 2. Install one **OMP Sessions** WebAPK (`org.chromium.webapk.*`) for the exact portless HTTPS origin under test (an app installed for a developer Mac does not qualify the retained Mac's origin):
 
    ```sh
-   export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4:$PATH"
+   export PATH="$HOME/.local/lib/omp-session-gateway/bun/v1.4.5:$PATH"
    bun scripts/android-webapk.ts setup "$ORIGIN"
    ```
 
@@ -181,7 +181,7 @@ Failed cleanup keeps `cleanupRequired: true`, never becomes a passing receipt, a
 
 ### Decision: PWA first
 
-Hosts run stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone behind `omp-gatewayd` (Bun `1.4.4`, TUN-mode Tailscale Serve, and exact login allowlisting; [Mainline OMP integration](OMP_INTEGRATION.md)), and the gateway resolves capabilities per launch without storing them ([Current claim](COMPATIBILITY.md#current-claim)).
+Hosts run stock mainline OMP `>= 18.1.20` with `collab.autoStart` alone behind `omp-gatewayd` (Bun `>=1.4.5`, TUN-mode Tailscale Serve, and exact login allowlisting; [Mainline OMP integration](OMP_INTEGRATION.md)), and the gateway resolves capabilities per launch without storing them ([Current claim](COMPATIBILITY.md#current-claim)).
 
 Because the upstream OMP collaboration client is already a browser application providing live **View** and **Control**, the Android client is the **OMP Sessions** Progressive Web App (PWA) mounting that pinned client rather than a separate native protocol implementation:
 

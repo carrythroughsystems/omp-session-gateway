@@ -49,7 +49,7 @@ No live OMP process, real transcript, production gateway, capability canary, or 
 
 ## Set up the Percy project
 
-Prerequisites: install Bun `1.4.4`, run `bun install --frozen-lockfile`, and run `bunx playwright install chromium` (`scripts/test-visual.ts` passes `--no-install` to Playwright in both local and upload modes).
+Prerequisites: install Bun `1.4.5`, run `bun install --frozen-lockfile`, and run `bunx playwright install chromium` (`scripts/test-visual.ts` passes `--no-install` to Playwright in both local and upload modes).
 
 Upload mode also requires native **Node.js 24.22.0 LTS** on `PATH` (or via `OMP_VISUAL_NODE_EXECUTABLE`); only `@percy/cli` runs under Node while builds, workers, and local validation run on Bun. CI pins `actions/setup-node` by commit, verifies exactly 24.22.0, and passes `OMP_VISUAL_NODE_EXECUTABLE` to the runner; local uploads resolve native `node` from `PATH` and fail on absence with `reason=node-missing` and `visual upload: Node.js is required for Percy`.
 

@@ -6,7 +6,7 @@ Automated suites prove **Tested** scope ([Status vocabulary](COMPATIBILITY.md#st
 
 ## How to run the suites
 
-Prerequisites: install Bun `1.4.4` (confirm with `bun --version`) and run `bun install --frozen-lockfile`.
+Prerequisites: install Bun `1.4.5` (confirm with `bun --version`) and run `bun install --frozen-lockfile`.
 
 Browser and visual suites also require Playwright browser binaries (`bun install` does not download them): run `bunx playwright install chromium` before `bun run test:browser` or `bun run test:visual`, and `bunx playwright install chromium firefox webkit` before `bun run test:browser:compat` (add `--with-deps` on Linux if Firefox or WebKit system libraries are missing; `bun run test:visual:percy` setup is in [Set up the Percy project](BROWSERSTACK.md#set-up-the-percy-project)).
 

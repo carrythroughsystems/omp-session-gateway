@@ -63,14 +63,14 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
       - name: Inspect embedded source against npm latest
         id: inspect
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(bun --version)" = 1.4.4
+          test "$(bun --version)" = 1.4.5
           bun scripts/client-drift.ts >"$RUNNER_TEMP/client-drift-report.json"
       - name: Retain complete source drift report
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -166,9 +166,9 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
       - name: Verify pinned Bun
-        run: test "$(bun --version)" = 1.4.4
+        run: test "$(bun --version)" = 1.4.5
       - run: bun install --frozen-lockfile
         if: ${{ hashFiles('bun.lock', 'bun.lockb') != '' }}
       - name: Ensure tmux is available
@@ -285,9 +285,9 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
       - name: Verify pinned Bun
-        run: test "$(bun --version)" = 1.4.4
+        run: test "$(bun --version)" = 1.4.5
       - run: bun install --frozen-lockfile
       - name: Install isolated stock OMP
         id: install

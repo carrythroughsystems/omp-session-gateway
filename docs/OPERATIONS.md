@@ -8,7 +8,7 @@ This guide is for administrators setting up, running, and troubleshooting OMP Se
 ## 1. One-time prerequisites
 
 - Stock mainline OMP `>= 18.1.20` on `PATH` (`omp --version`).
-- Bun `1.4.4` installed at a persistent path for the gateway user service (`bun --version`).
+- Bun `1.4.5` or newer for v0.13.0, installed at a persistent path for the gateway user service (`bun --version`).
 - Tailscale installed and signed in to the same private Tailscale network (tailnet) on the gateway host and your phone, with kernel TUN-mode networking on the gateway host (not userspace networking).
 - Tailnet HTTPS certificates and MagicDNS (Tailscale's automatic DNS for tailnet hosts) enabled so [Tailscale Serve](https://tailscale.com/kb/1312/serve) can proxy tailnet HTTPS to loopback.
 - A tailnet access policy granting only your intended users HTTPS access to the gateway host (template in [`../examples/tailscale-policy.hujson`](../examples/tailscale-policy.hujson)).
@@ -27,7 +27,7 @@ Check these rules before running `install`:
 
 - If you are upgrading from `v0.3.0` or earlier (releases that used `publisher-token`), stop and unregister that service with its own CLI first ([Recover across the v0.3.0 boundary](UPGRADE_ROLLBACK.md#recover-across-the-v030-boundary)).
 - Run as your normal desktop user, never `root`.
-- Keep Bun `1.4.4` at the persistent path used during `install`; the user service executes that exact path.
+- Keep the Bun executable at the persistent path used during `install`; the user service executes that exact path.
 
 1. Extract the verified release archive and enter its directory.
 2. Run `install` with your exact Tailscale HTTPS origin and login, then run `serve-guidance` to print your Tailscale Serve command.

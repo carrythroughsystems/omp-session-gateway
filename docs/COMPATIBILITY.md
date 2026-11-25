@@ -77,6 +77,8 @@ The gateway reads OMP discovery files, polls metadata snapshots, and resolves ca
 
 In CI, `linux-arm64-source-checkout` stages the Linux arm64 native package at the `UPSTREAM.lock.json` version and runs upstream's three registry suites to gate discovery and queries only ([Linux qualification](LINUX_QUALIFICATION.md)). On Windows, `windows-service-lifecycle` gates gateway contracts, ACLs, and scheduled-task lifecycle, while `canary-windows` exercises stock OMP discovery over named pipes ([Windows qualification](WINDOWS_QUALIFICATION.md)).
 
+The source toolchain and the next qualification campaign pin Bun `1.4.5`. The v0.13.0 archives declare Bun `>=1.4.5`, but the published v0.12.0 qualification above remains unchanged. The new candidate must requalify all thirteen lanes under the new pin.
+
 ## Versioned interfaces
 
 Four compatibility surfaces version independently:
@@ -150,7 +152,7 @@ Every published release identifies the exact OMP and `collab-web` source, build 
 
 ## Upstream refresh procedure
 
-Maintainers follow these steps under Bun `1.4.4` when proposing an OMP baseline refresh:
+Maintainers follow these steps under Bun `1.4.5` when proposing an OMP baseline refresh:
 
 1. Inspect the upstream release tag and collaboration-related source changes.
 2. Run `bun scripts/upstream-pins.ts <version> --write` to write the exact tag, commit, tree, package versions, observation date, and integrity-verified Darwin arm64 and Windows x64 native pins into `UPSTREAM.lock.json` and `scripts/windows-qualification-pins.json`, and record the review notes in `UPSTREAM.lock.json` (the script refuses unsatisfied Bun ranges and missing tracked paths).

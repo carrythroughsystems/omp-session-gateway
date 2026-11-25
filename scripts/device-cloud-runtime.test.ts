@@ -14,6 +14,7 @@ import type { CloudDevice } from "./device-cloud-common.ts";
 import { abortablePause } from "./provider-read.ts";
 import { JOURNEY_VIEW_STATE } from "./browser-journey.ts";
 import type { QualificationExecutionContext } from "./stable-qualification.ts";
+import upstream from "../UPSTREAM.lock.json";
 
 const epoch = "11111111-2222-4333-8444-555555555555";
 const catalog: readonly CloudDevice[] = [
@@ -221,7 +222,7 @@ describe("first-visit service worker settling", () => {
       tag: "v0.9.1-prealpha.4",
       candidate: { tag: "v0.9.1-prealpha.4", sourceCommit: "a".repeat(40), archiveSha256: "b".repeat(64), archivePath: "/synthetic/archive.tar" },
       omp: {
-        bunVersion: "1.4.4", sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), version: "18.1.20",
+        bunVersion: upstream.bunVersion, sourceCommit: "c".repeat(40), sourceTree: "d".repeat(40), version: "18.1.20",
         nativeTarballSha256: "e".repeat(64), nativeBinarySha256: "f".repeat(64),
       },
       origin: "https://fixture.invalid",

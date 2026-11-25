@@ -7,6 +7,7 @@ import { expect, test, setDefaultTimeout } from "bun:test";
 import { assertMacExposureEvidence, loadConfiguredMacTarget, parseStableQualificationArgs } from "./stable-qualification.ts";
 import { PRODUCT_VERSION } from "./build-release.ts";
 import { HANG_DEADLINE_MS } from "../apps/gateway/test/test-support.ts";
+import upstream from "../UPSTREAM.lock.json";
 
 setDefaultTimeout(2 * HANG_DEADLINE_MS);
 
@@ -117,7 +118,7 @@ async function runOmpCleanup(
       OMP_PIN_SOURCE_COMMIT: "source",
       OMP_PIN_SOURCE_TREE: cleanupSourceTree,
       OMP_PIN_VERSION: cleanupVersion,
-      OMP_PIN_BUN_VERSION: "1.4.4",
+      OMP_PIN_BUN_VERSION: upstream.bunVersion,
       OMP_PIN_NATIVE_TARBALL_SHA256: "tarball",
       OMP_PIN_NATIVE_BINARY_SHA256: "binary",
       OMP_QUAL_NATIVE_FIXTURE: join(home, "native-fixture"),

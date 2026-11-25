@@ -120,7 +120,7 @@ Apply this style when rendering public copy, without rewriting stored release ev
 2. **Stock OMP, no fork:** OMP `>= 18.1.20` supplies the native registry and
    controller. No custom OMP build or gateway-specific OMP plugin is needed.
    The gateway remains a separate companion, not an official OMP product.
-3. **One-time setup:** install the gateway with Bun 1.4.4, enable
+3. **One-time setup:** install the gateway with Bun 1.4.5 or newer, enable
    `collab.autoStart` once, and configure TUN-mode Tailscale Serve with an exact
    user allowlist and Funnel disabled. Then start participating sessions with
    plain `omp`. Say "no per-session link copying", not "no setup".

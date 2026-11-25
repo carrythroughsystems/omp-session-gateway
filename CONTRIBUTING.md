@@ -10,7 +10,7 @@ The gateway integrates with stock OMP `>= 18.1.20` through its native discovery 
 
 For ordinary host installation, use the [published release archive](docs/OPERATIONS.md#2-cli-and-daemon-installation). A source checkout is for development and does not carry signed-release qualification ([Current claim](docs/COMPATIBILITY.md#current-claim)).
 
-Prerequisites: Git with commit signing enabled, Bun `1.4.4` (pinned in `package.json` and `mise.toml`), and GitHub CLI (`gh`) for pull-request and merge-queue commands.
+Prerequisites: Git with commit signing enabled, Bun `1.4.5` (pinned in `package.json` and `mise.toml`), and GitHub CLI (`gh`) for pull-request and merge-queue commands.
 
 1. Confirm the pinned Bun version:
 
@@ -18,7 +18,7 @@ Prerequisites: Git with commit signing enabled, Bun `1.4.4` (pinned in `package.
    bun --version
    ```
 
-   The output must be `1.4.4`.
+   The output must be `1.4.5`.
 
 2. Install locked dependencies from the repository root:
 

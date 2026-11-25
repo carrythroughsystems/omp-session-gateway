@@ -1,6 +1,6 @@
 # `apps/gateway`
 
-This package implements the `omp-gateway` CLI and the per-user `omp-gatewayd` daemon; use this guide to find the module, command, state file, or test suite that owns each gateway behavior. The daemon reads the collaboration discovery directory published by stock Oh My Pi (OMP) `>= 18.1.20` under Bun `1.4.4` behind TUN-mode Tailscale Serve; for host installation, multi-host setup, fleet notifications, speech, and Tern session creation, see [Installation and operations](../../docs/OPERATIONS.md).
+This package implements the `omp-gateway` CLI and the per-user `omp-gatewayd` daemon; use this guide to find the module, command, state file, or test suite that owns each gateway behavior. The daemon runs on Bun `>=1.4.5` behind TUN-mode Tailscale Serve and reads the collaboration discovery directory published by stock Oh My Pi (OMP) `>= 18.1.20`. For host installation, multi-host setup, fleet notifications, speech, and Tern session creation, see [Installation and operations](../../docs/OPERATIONS.md).
 
 ## Module map
 

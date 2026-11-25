@@ -53,8 +53,10 @@ const deterministicSource = releaseSourceFromEpoch("a".repeat(40), "1700000000")
 
 test("release builders require the exact pinned Bun runtime", () => {
   const pinned = packageManifest.packageManager.replace(/^bun@/u, "");
+  const [major, minor, patch] = pinned.split(".");
+  const newer = `${major}.${minor}.${Number(patch) + 1}`;
   expect(() => assertBuilderRuntime(pinned, pinned)).not.toThrow();
-  for (const version of ["0.0.0", `${pinned}-canary`, "1.4.5", ""]) {
+  for (const version of ["0.0.0", `${pinned}-canary`, newer, ""]) {
     expect(() => assertBuilderRuntime(version, pinned)).toThrow("release builder requires Bun");
   }
 });

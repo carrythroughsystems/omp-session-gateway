@@ -10,7 +10,7 @@ Source-level file inventories are in the [gateway module map](../apps/gateway/RE
 
 ### 1.1 Mainline OMP discovery reader
 
-Stock mainline OMP `>= 18.1.20` owns its collaboration controller and per-host local registry; no fork, custom OMP build, or gateway-specific OMP plugin is used. Operators enable `collab.autoStart` once and run plain `omp` alongside Bun 1.4.4 and TUN-mode Tailscale Serve; see [Mainline OMP integration](OMP_INTEGRATION.md).
+Stock mainline OMP `>= 18.1.20` owns its collaboration controller and per-host local registry; no fork, custom OMP build, or gateway-specific OMP plugin is used. Operators enable `collab.autoStart` once and run plain `omp` alongside Bun 1.4.5 or newer and TUN-mode Tailscale Serve; see [Mainline OMP integration](OMP_INTEGRATION.md).
 
 `OmpHostReader` (`apps/gateway/src/omp-registry.ts`) reads discovery entries under `~/.omp/run/collab-hosts` (or configured `omp.discoveryDir`) and queries each entry's published `endpoint` with its per-host token. Because OMP relocates long socket paths, deriving a socket path from the JSON filename is invalid, and the gateway never writes, renames, or unlinks anything in the discovery directory.
 
