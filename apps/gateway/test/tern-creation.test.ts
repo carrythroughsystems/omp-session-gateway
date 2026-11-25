@@ -34,6 +34,7 @@ interface FixtureOptions {
   hosts?: AdoptionObservation["hosts"];
   baseline?: AdoptionObservation["hosts"];
   inspection?: TernInspection;
+  inspectionJson?: string;
   authorization?: "ok" | "missing";
   failWrite?: number;
   contents?: string;
@@ -122,7 +123,7 @@ async function fixture(options: FixtureOptions = {}) {
       },
     },
     cli: {
-      async inspect() {
+      async inspect(_profile, _signal, createdBlockId) {
         if (inspecting) { collisions++; return undefined; }
         inspecting = true;
         try {
@@ -140,7 +141,8 @@ async function fixture(options: FixtureOptions = {}) {
               '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":null}]}',
             ));
           }
-          const inspection = options.inspection ?? target;
+          const inspection = options.inspectionJson === undefined ? options.inspection ?? target
+            : parseTernInspection(new TextEncoder().encode(options.inspectionJson), createdBlockId);
           metadataReported ||= inspection.panes.some(pane => pane.paneId === "42" && pane.sessionBasename === basename);
           return inspection;
         } finally { inspecting = false; }
@@ -474,6 +476,43 @@ describe("durable session creation transitions", () => {
       expect(f.creates).toBe(checkpoint <= 2 ? 0 : 1); expect(f.writes).toHaveLength(checkpoint);
     });
   }
+});
+
+describe("created command exit", () => {
+  function document(blocks: readonly { id: number; exited?: unknown }[], withSession = false): string {
+    return JSON.stringify({ sessions: [{ tabs: [{ blocks }] }], panes: withSession
+      ? [{ pane: 42, omp_session_file: "/synthetic/session-one.jsonl", exited: 1 }] : [] });
+  }
+  const exitedStatus = { operationId, state: "started_unavailable", error: "command_exited",
+    updatedAt: new Date(initialTime).toISOString() } as const;
+
+  for (const exited of [127, 1, 0]) {
+    test(`reports exit ${exited} on the first inspection without waiting for the deadline`, async () => {
+      const f = await fixture({ inspectionJson: document([{ id: 42, exited }]), hosts: [] });
+      await f.service.accept("owner", request, () => true);
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toEqual(exitedStatus);
+    });
+  }
+  test("prefers the block exit over an adoptable host and durably retains the result on restart", async () => {
+    const f = await fixture({ inspectionJson: document([{ id: 42, exited: 0 }], true) });
+    await f.service.accept("owner", request, () => true);
+    await f.finish();
+    expect(f.service.status("owner", operationId)).toEqual(exitedStatus);
+    expect(validateCreationLedger(f.contents!)[0]?.status).toEqual(exitedStatus);
+    const restarted = await fixture({ contents: f.contents! });
+    expect(restarted.service.status("owner", operationId)).toEqual(exitedStatus);
+    expect(restarted.creates).toBe(0);
+    await restarted.service.stop();
+  });
+  test("still adopts with absent, running or unrecognized exit metadata despite another block or pane's exit", async () => {
+    for (const exited of [undefined, null, "1", { status: 1 }]) {
+      const f = await fixture({ inspectionJson: document([{ id: 42, exited }, { id: 43, exited: 1 }], true) });
+      await f.service.accept("owner", request, () => true);
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toMatchObject({ state: "ready" });
+    }
+  });
 });
 
 describe("private ledger startup and retention", () => {

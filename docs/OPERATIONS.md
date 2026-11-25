@@ -475,12 +475,13 @@ Warning — trust boundary: Enabling `tern` lets allowed Tailscale logins — in
 
 ### Creation outcomes
 
-All creations pass `--keep-open` to Tern so failed commands remain visible in their tab, and wait up to the 110-second daemon adoption deadline (`SessionCreationStatus.state` in [Session creation state machine](PROTOCOL.md#session-creation-state-machine)):
+All creations pass `--keep-open` to Tern, so the tab stays readable after its command ends, including a command that exits with status 0. If Tern reports that the created block's command ended, the gateway stops waiting without using the rest of the 110-second deadline ([Session creation state machine](PROTOCOL.md#session-creation-state-machine)).
 
 | Outcome | What it means on the host | What the administrator does |
 |---|---|---|
 | `ready` | Tern opened the tab, OMP published to `omp.discoveryDir` with Control, and the gateway adopted `{ instanceId, generation }`. | None; **OMP Sessions** opens the session in **Control**. |
-| `started_unavailable` | Tern started the tab, so the command ran, but no unique Control session was adopted within 110 seconds (or the daemon restarted). | Inspect the kept-open tab in Tern, confirm `omp config get collab.autoStart` is `control` inside Tern, and refresh the directory. |
+| `started_unavailable` / `command_exited` | The command ended before the gateway adopted an OMP session. | Read the kept-open tab in Tern to see why the command ended. |
+| Other `started_unavailable` | No unique Control session was adopted before the deadline, correlation was ambiguous, or the daemon was interrupted. | Inspect the kept-open tab in Tern, confirm `omp config get collab.autoStart` is `control` inside Tern, and refresh the directory. |
 | `failed` | Preflight validation (such as an unreadable discovery directory or missing `tern.window` slot), OS spawn, or pre-launch restart stopped before spawning. | Run `omp-gateway doctor`, check `tern` paths, `profile.env`, and `tern inspect --json --window <slot>`, then retry. |
 | `outcome_unknown` | The `tern` CLI child started, so a tab may exist, but its output timed out, failed, or was interrupted; the gateway never auto-retries. | Check Tern tabs and **OMP Sessions** before starting another session so you do not start a duplicate `omp` process. |
 | Browser stopped watching | Closing the tray, backgrounding, or hitting the 120-second browser watch limit stopped browser polling while the host operation continues. | Reopen **New session** in **OMP Sessions** to check the existing operation ([Start a new session](USAGE.md#start-a-new-session)). |

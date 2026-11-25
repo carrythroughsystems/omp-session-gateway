@@ -39,6 +39,16 @@ describe("session creation public contract", () => {
     }
   });
 
+  test("accepts command_exited only for a started_unavailable status", () => {
+    for (const state of SESSION_CREATION_STATES) {
+      const value = { ...status, state, error: "command_exited",
+        ...(state === "ready" ? { session: { instanceId: "instance-test", generation: 1 } } : {}) };
+      if (state === "started_unavailable") expect<unknown>(parseSessionCreationStatus(value)).toEqual(value);
+      else expect(() => parseSessionCreationStatus(value)).toThrow(ProtocolValidationError);
+      expect(schemas[2]!(value)).toBe(state === "started_unavailable");
+    }
+  });
+
   test("rejects missing, unknown, null, aliased UUID and execution-bearing request fields", () => {
     for (const key of Object.keys(request)) {
       const value = { ...request } as Record<string, unknown>;

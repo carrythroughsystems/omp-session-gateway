@@ -404,7 +404,7 @@ export class SessionCreationController {
           this.stopRequests();
           this.draft = "";
           this.deps.discardDraft();
-          this.terminal(status.state);
+          this.terminal(status);
         }
       } catch (error) {
         if (!this.current(ticket)) return;
@@ -434,11 +434,14 @@ export class SessionCreationController {
     this.panel("terminal", "Creation not accepted", body);
   }
 
-  private terminal(state: string): void {
+  private terminal(status: SessionCreationStatus): void {
     const body = document.createElement("div");
-    const copy = state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here."
-      : state === "outcome_unknown" ? "It may have started. Check Tern and the directory before creating another."
-        : "The operation did not start a command. A new attempt needs another explicit Create action.";
+    const { state } = status;
+    const copy = state === "started_unavailable" && status.error === "command_exited"
+      ? "The command ended before its session was ready. Check its tab in Tern to see why."
+      : state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here."
+        : state === "outcome_unknown" ? "It may have started. Check Tern and the directory before creating another."
+          : "The operation did not start a command. A new attempt needs another explicit Create action.";
     body.append(text("p", copy), button("Refresh directory", () => { void this.deps.refresh(this.source!); this.cancel("close"); }),
       button("Start another session", () => this.startChoices()));
     this.panel("terminal", state === "failed" ? "Session did not start" : state === "outcome_unknown" ? "Outcome unknown" : "Started in Tern", body);

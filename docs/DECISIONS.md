@@ -1943,7 +1943,7 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 **Decision:** Keep Tern an execution environment for stock OMP, not a discovery adapter or general control surface; ADR-043 permits only opt-in new-tab creation and inspect-metadata adoption:
 
 - Session identity remains OMP's `instanceId` and `generation`, published to `~/.omp/run/collab-hosts` (or `~/.<PI_CONFIG_DIR>/run/collab-hosts`) whenever `collab.autoStart` is `view` or `control` ([ADR-028](#adr-028--consume-mainline-omp-discovery-and-resolve-capabilities-only-at-launch)).
-- The gateway has no Tern discovery adapter or general Tern control API, reads no `tsp.ts` frames, and performs no terminal or pane scraping. Only ADR-043 may consume losslessly parsed local block/pane IDs and an `omp_session_file` basename for creation correlation; these never replace gateway session identity, and no session file is opened.
+- The gateway has no Tern discovery adapter or general Tern control API, reads no `tsp.ts` frames, and performs no terminal or pane scraping. Only ADR-043 may consume losslessly parsed local block/pane IDs and an `omp_session_file` basename for creation correlation, and whether the created local block's command has exited; these never replace gateway session identity, and no session file is opened.
 - Multiple Tern windows or panes mirroring the same `omp` process share one OMP discovery entry and appear as one session row.
 - A remote Tern pane running `omp` on another host is discovered by the gateway running as that user on that execution host (and accessed either on that host's PWA or via browser-direct federation under [ADR-036](#adr-036--federated-dashboard-origins-through-browser-direct-cors)), never through local terminal inspection on the viewing machine.
 - Launching **View** or **Control** from **OMP Sessions** always opens OMP's collaboration client in the browser; it never focuses, attaches to, or sends keystrokes to a native Tern pane.
@@ -2167,6 +2167,35 @@ creation smoke or release qualification.
   wholesale; the retained `v0.9.1` parser rejects `window` before projection and accepts the
   Tern-free projected document. Restoring a selector requires a window-capable runtime.
   Window keys, paths, and CLI output never enter gateway logs or diagnostics.
+
+### 2026-11-24 amendment — detect an exited creation command
+
+On macOS, Tern `0.9.33` (`3a79092`) reported `exited: null` on a running block in
+`sessions[].tabs[].blocks[]` and an integer after the command ended: `0` for success,
+`1` for failure, and `127` for a missing executable. `live` remained true on kept-open
+blocks after exit. Creation retains `--keep-open`, so the operator can read the tab.
+
+Only adoption asks for the exit fact, and only for the local block ID from its tab
+receipt. When exactly one block matches, an integer `exited` lexeme means the command
+ended. The adapter does not interpret, retain, log, or send the exit status value.
+It does not consult `exited` on any other block or on any pane. An absent, null, or
+unrecognized field is not evidence of exit: adoption continues as before, including
+its normal timeout, rather than failing creations if Tern changes this field.
+
+An observed exit ends adoption as `started_unavailable` / `command_exited` **before**
+the gateway tries to match an OMP host in that iteration. The latest OMP observation
+can be one poll round older than this inspection; a host that published and whose
+command has since exited must not be handed to the browser as `ready`.
+
+- A v0.12.0 PWA rejects the unknown status error and shows **Stopped watching** with
+  “The host response was lost.” It already has the operation ID: **Check creation**
+  retries only the status GET and pauses again on the same response, never replaying
+  the create POST. Check the kept-open tab or use an updated PWA.
+- A v0.12.x runtime rejects a ledger containing `command_exited` before it can prune
+  expired records. Creation stays `ledger_unavailable`; with `tern` configured,
+  `doctor` reports `ternAvailable: false`. Managed rollback disables creation but
+  keeps the ledger. Before re-enabling creation on the older runtime, follow
+  [Tern creation on every managed rollback](UPGRADE_ROLLBACK.md#tern-creation-on-every-managed-rollback).
 
 ## ADR-044 — Bounded automatic infrastructure recovery on the same candidate
 

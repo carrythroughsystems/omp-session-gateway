@@ -333,8 +333,11 @@ export class SessionCreationService {
       // Includes batches received while createTab was still resolving executable paths or its receipt.
       if (latest && latest.startedAt <= actualSpawnedAt.monotonicMs) latest = undefined;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
-        const current = await this.#cli.inspect(profile, signal);
+        const current = await this.#cli.inspect(profile, signal, result.blockId);
         if (signal.aborted) break;
+        if (current?.commandExited) {
+          await this.#transition(operationId, { state: "started_unavailable", error: "command_exited" }); return;
+        }
         const file = current && matchingTernBasename(current, result.blockId);
         if (file && latest?.directoryHealthy) {
           const eligible = latest.hosts.filter(host => !instances.has(host.instanceId) && !sessions.has(host.sessionId) &&

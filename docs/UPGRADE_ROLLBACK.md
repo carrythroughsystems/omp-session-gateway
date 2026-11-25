@@ -67,7 +67,19 @@ Older gateway runtimes reject unknown `config.json` keys and refuse to start if 
 
 Before removing any authored key, `rollback` writes the complete original `config.json` to `<configDir>/config.pre-rollback.json` with owner-only permissions (`0600` on Linux and macOS; protected user ACL on Windows). There is one `config.pre-rollback.json` backup file; if it exists, `rollback` refuses to overwrite it and aborts before changing `config.json` or the service (restore, move, or remove that backup file first).
 
-If the target runtime fails readiness, `rollback` restores the original `config.json` and repairs the active service definition. Older runtimes ignore the preserved state files in `<stateDir>`, answer unimplemented APIs with `404`, and leave running Tern tabs and `omp` processes untouched.
+If the target runtime fails readiness, `rollback` restores the original `config.json` and repairs the active service definition. Older runtimes answer unimplemented APIs with `404` and leave running Tern tabs and `omp` processes untouched.
+
+**Before re-enabling creation on a pre-0.13.0 runtime:** If the preserved ledger contains
+`command_exited`, the older creation service rejects the whole ledger (`ledger_unavailable`).
+Waiting 24 hours or restarting does not fix it: expiry pruning follows successful validation,
+and an unhealthy service never rewrites the file. With `tern` configured, `doctor` reports
+`ternAvailable: false`; existing session discovery and launch still work.
+
+To clear an incompatible ledger, make sure no creation is in progress, stop the gateway,
+and remove **only** `<stateDir>/session-creations.json` before starting (or restarting)
+the older runtime with creation enabled. This discards up to 24 hours of status and
+idempotency records without closing any tabs. Do not replay old creation requests:
+check Tern and the directory for an existing session first.
 
 For the multi-host, creation, and fleet notification designs, see [ADR-036](DECISIONS.md#adr-036--federated-dashboard-origins-through-browser-direct-cors), [ADR-043](DECISIONS.md#adr-043--opt-in-tern-creation-with-omp-native-adoption), and [ADR-048](DECISIONS.md#adr-048--fleet-notifications-through-the-home-gateway-as-coordinator). Never copy `notification-grants.json`, `fleet-notifications.json`, or `session-creations.json` into support archives.
 

@@ -202,6 +202,7 @@ for (const viewport of [{ width: 412, height: 915 }, { width: 1280, height: 800 
 const terminalStates: NonNullable<CreationFixtureConfig["states"]> = [
   { state: "failed", error: "preflight_failed" }, { state: "failed", error: "spawn_failed" }, { state: "failed", error: "interrupted" },
   { state: "started_unavailable", error: "adoption_timeout" }, { state: "started_unavailable", error: "correlation_ambiguous" },
+  { state: "started_unavailable", error: "command_exited" },
   { state: "started_unavailable", error: "control_unavailable" }, { state: "started_unavailable", error: "interrupted" },
   { state: "outcome_unknown", error: "launch_outcome_unknown" }, { state: "outcome_unknown", error: "interrupted" },
 ];
@@ -215,9 +216,11 @@ for (const terminal of terminalStates) {
       await review(page);
       await page.getByRole("button", { name: "Create and open Control", exact: true }).click();
       await panel(page, "terminal");
-      await expect(page.locator(".creation-terminal")).toContainText(terminal.state === "failed" ? "did not start a command"
-        : terminal.state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here"
-          : "It may have started. Check Tern and the directory before creating another");
+      await expect(page.locator(".creation-terminal")).toContainText(terminal.error === "command_exited"
+        ? "The command ended before its session was ready. Check its tab in Tern to see why."
+        : terminal.state === "failed" ? "did not start a command"
+          : terminal.state === "started_unavailable" ? "Tern started the command, but OMP could not be opened here"
+            : "It may have started. Check Tern and the directory before creating another");
       expect(fixture.creationRequests).toHaveLength(1);
       expect(fixture.launchRequests).toHaveLength(0);
       await capture(page, fixture, `${terminal.state}-${terminal.error}`);
