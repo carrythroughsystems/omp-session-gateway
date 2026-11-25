@@ -1992,7 +1992,27 @@ function restoreDismissedSessions(): void {
   render();
 }
 
+/** A row can outlive its metadata. Bind only its identity and resolve the action at the click. */
+function bindRowAction(
+  button: HTMLButtonElement, key: string, kind: "working" | "request",
+  action: (current: SessionMetadata, button: HTMLButtonElement) => void,
+): void {
+  button.addEventListener("click", () => {
+    const current = sessions.get(key);
+    if (current === undefined || (kind === "request" ? current.ask === undefined : current.inputRequired)) {
+      render();
+      return;
+    }
+    action(current, button);
+  });
+}
+
+function openRowRequest(current: SessionMetadata, button: HTMLButtonElement): void {
+  void launch(current, current.canControl ? "control" : "view", button, current.ask?.requestId, selectedScope, "request-tray");
+}
+
 function createWorkingRow(session: SessionMetadata): HTMLElement {
+  const key = sessionKey(session);
   const frame = document.createElement("div");
   frame.className = "working-row-frame";
   frame.dataset.instanceId = session.instanceId;
@@ -2023,7 +2043,7 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   ]);
   if (details !== undefined) copy.append(details);
   button.append(createSessionTile(session, activityState(session)), copy);
-  button.addEventListener("click", () => void launch(session, "view", button));
+  bindRowAction(button, key, "working", (current, control) => void launch(current, "view", control));
 
   const dismiss = document.createElement("button");
   dismiss.type = "button";
@@ -2031,7 +2051,7 @@ function createWorkingRow(session: SessionMetadata): HTMLElement {
   dismiss.title = "Hide on this device — the OMP process keeps running";
   dismiss.setAttribute("aria-label", `Hide ${spokenTitle(session)} on this device`);
   dismiss.append(createIcon("eye-off"));
-  dismiss.addEventListener("click", () => dismissSession(session));
+  bindRowAction(dismiss, key, "working", dismissSession);
   frame.append(button, dismiss);
   return frame;
 }
@@ -2065,13 +2085,12 @@ function createWaitingRow(session: SessionMetadata): HTMLButtonElement {
     createTextElement("span", "row-time", waitingLabel(session)),
     createIcon("chevron-right", "icon row-chevron"),
   );
-  button.addEventListener("click", () =>
-    void launch(session, mode, button, session.ask?.requestId, selectedScope, "request-tray"),
-  );
+  bindRowAction(button, sessionKey(session), "request", openRowRequest);
   return button;
 }
 
 function createHeldRow(session: SessionMetadata): HTMLElement {
+  const key = sessionKey(session);
   const mode: LaunchMode = session.canControl ? "control" : "view";
   const row = document.createElement("div");
   row.className = "held-row";
@@ -2099,21 +2118,19 @@ function createHeldRow(session: SessionMetadata): HTMLElement {
     copy,
     createTextElement("span", "row-time", waitingLabel(session)),
   );
-  open.addEventListener("click", () =>
-    void launch(session, mode, open, session.ask?.requestId, selectedScope, "request-tray"),
-  );
+  bindRowAction(open, key, "request", openRowRequest);
 
   const requeue = document.createElement("button");
   requeue.type = "button";
   requeue.className = "held-requeue";
   requeue.textContent = "Requeue";
   requeue.setAttribute("aria-label", `Return ${spokenTitle(session)} to the queue`);
-  requeue.addEventListener("click", () => requeueHeldSession(session));
+  bindRowAction(requeue, key, "request", requeueHeldSession);
   row.append(open, requeue);
   return row;
 }
 
-function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
+function appendDismissedControl(list: HTMLElement, dismissed: readonly SessionMetadata[]): void {
   if (dismissed.length === 0) return;
   const control = document.createElement("aside");
   control.className = "dismissed-control";
@@ -2123,10 +2140,11 @@ function appendDismissedControl(dismissed: readonly SessionMetadata[]): void {
   restore.textContent = "Show all";
   restore.addEventListener("click", restoreDismissedSessions);
   control.append(restore);
-  sessionList.append(control);
+  list.append(control);
 }
 
 function renderAllClear(
+  list: HTMLElement,
   working: readonly SessionMetadata[],
   dismissed: readonly SessionMetadata[],
   arrived: boolean,
@@ -2163,21 +2181,22 @@ function renderAllClear(
     hint.addEventListener("click", openAlerts);
     summary.append(hint);
   }
-  sessionList.append(summary);
+  list.append(summary);
   if (working.length > 0) {
-    sessionList.append(createQueueKicker(complete ? "Live sessions" : "Sessions"));
-    for (const session of working) sessionList.append(createWorkingRow(session));
+    list.append(createQueueKicker(complete ? "Live sessions" : "Sessions"));
+    for (const session of working) list.append(createWorkingRow(session));
   }
-  appendDismissedControl(dismissed);
+  appendDismissedControl(list, dismissed);
 }
 
 function renderWaitingQueue(
+  list: HTMLElement,
   waiting: readonly SessionMetadata[],
   held: readonly SessionMetadata[],
   working: readonly SessionMetadata[],
   dismissed: readonly SessionMetadata[],
 ): void {
-  if (!scopeComplete()) renderAllClear([], [], false);
+  if (!scopeComplete()) renderAllClear(list, [], [], false);
   const [hero, ...remaining] = waiting;
   if (hero === undefined) {
     const summary = document.createElement("div");
@@ -2187,9 +2206,9 @@ function renderWaitingQueue(
       createTextElement("strong", "", scopeComplete() ? `Queue clear · ${held.length} on hold — handle at desk`
         : scopeCoverage().failed ? `${held.length} on hold · some hosts unavailable` : `${held.length} on hold · checking other hosts`),
     );
-    sessionList.append(summary);
+    list.append(summary);
   } else {
-    sessionList.append(selectedScope === "all" && sources.size > 1
+    list.append(selectedScope === "all" && sources.size > 1
       ? createQueueKicker("Up next", "observed waiting order", "note")
       : createQueueKicker("Up next", waitingLabel(hero)));
     const article = document.createElement("article");
@@ -2234,10 +2253,8 @@ function renderWaitingQueue(
       primary.dataset.busy = "true";
       primary.setAttribute("aria-busy", "true");
     }
-    primary.addEventListener("click", () => {
-      const mode: LaunchMode = hero.canControl ? "control" : "view";
-      void launch(hero, mode, primary, hero.ask?.requestId, selectedScope, "request-tray");
-    });
+    const key = sessionKey(hero);
+    bindRowAction(primary, key, "request", openRowRequest);
     article.append(primary);
 
     const options = document.createElement("button");
@@ -2245,7 +2262,8 @@ function renderWaitingQueue(
     options.className = "hero-options";
     options.textContent = "Options";
     options.setAttribute("aria-haspopup", "dialog");
-    options.addEventListener("click", () => {
+    bindRowAction(options, key, "request", current => {
+      // Tray choices bind to the request explicitly selected on opening Options, not on row build.
       const choices = document.createElement("div");
       const hold = document.createElement("button");
       hold.type = "button";
@@ -2253,18 +2271,18 @@ function renderWaitingQueue(
       hold.textContent = "Hold for desk";
       hold.addEventListener("click", () => {
         tray.close(true);
-        holdSession(hero);
+        holdSession(current);
       });
       choices.append(hold);
-      if (hero.canView) {
+      if (current.canView) {
         const transcript = document.createElement("button");
         transcript.type = "button";
         transcript.className = "tray-choice";
         transcript.textContent = "View transcript";
-        transcript.disabled = !sourceFresh(hero.sourceKey);
+        transcript.disabled = !sourceFresh(current.sourceKey);
         transcript.addEventListener("click", () => {
           tray.close(true);
-          void launch(hero, "view", transcript);
+          void launch(current, "view", transcript);
         });
         choices.append(transcript);
       }
@@ -2273,22 +2291,22 @@ function renderWaitingQueue(
       tray.open({ id: "options", title: "This request", tone: "attention", body: choices });
     });
     article.append(options);
-    sessionList.append(article);
+    list.append(article);
   }
 
   if (remaining.length > 0) {
-    sessionList.append(createQueueKicker("Then"));
-    for (const session of remaining) sessionList.append(createWaitingRow(session));
+    list.append(createQueueKicker("Then"));
+    for (const session of remaining) list.append(createWaitingRow(session));
   }
   if (held.length > 0) {
-    sessionList.append(createQueueKicker(`On hold · ${held.length}`));
-    for (const session of held) sessionList.append(createHeldRow(session));
+    list.append(createQueueKicker(`On hold · ${held.length}`));
+    for (const session of held) list.append(createHeldRow(session));
   }
   if (working.length > 0) {
-    sessionList.append(createQueueKicker(`${scopeComplete() ? "Live sessions" : "Sessions"} · ${working.length}`));
-    for (const session of working) sessionList.append(createWorkingRow(session));
+    list.append(createQueueKicker(`${scopeComplete() ? "Live sessions" : "Sessions"} · ${working.length}`));
+    for (const session of working) list.append(createWorkingRow(session));
   }
-  appendDismissedControl(dismissed);
+  appendDismissedControl(list, dismissed);
 }
 
 /* ——— Motion ——————————————————————————————————————————————————————
@@ -2340,6 +2358,7 @@ function nameDirectoryRows(named: boolean): void {
     const key = `${keyed.dataset.sourceKey ?? ""}\0${keyed.dataset.instanceId ?? ""}`;
     element.style.setProperty("view-transition-name", named && sessions.has(key) ? rowName(key) : "");
     element.style.setProperty("view-transition-class", named ? "omp-row" : "");
+    if (!named && element.getAttribute("style") === "") element.removeAttribute("style");
   }
 }
 
@@ -2411,6 +2430,10 @@ function render(): void {
 }
 
 function renderDirectory(arrived = false): void {
+  const nextList = sessionList.cloneNode(false) as HTMLElement;
+  renderDirectoryContents(nextList, arrived);
+  // Compare with the live markup: a pending launch may have changed a label or disabled a button.
+  if (!arrived && nextList.outerHTML === sessionList.outerHTML) return;
   const focused = document.activeElement;
   const keyed = focused !== null && sessionList.contains(focused)
     ? focused.closest<HTMLElement>("[data-instance-id]") : null;
@@ -2418,8 +2441,9 @@ function renderDirectory(arrived = false): void {
     sourceKey: keyed.dataset.sourceKey ?? localKey,
     instanceId: keyed.dataset.instanceId,
   };
-  renderDirectoryContents(arrived);
-  // Snapshot/SSE refreshes replace row nodes even when there is no structural animation.
+  sessionList.className = nextList.className;
+  sessionList.setAttribute("aria-label", nextList.getAttribute("aria-label")!);
+  sessionList.replaceChildren(...nextList.children);
   if (focusRef !== undefined && focused !== null) {
     let restored = false;
     for (const control of sessionList.querySelectorAll<HTMLElement>(focused.tagName)) {
@@ -2488,10 +2512,9 @@ function renderEmptyState(): void {
   emptyState.append(body);
 }
 
-function renderDirectoryContents(arrived = false): void {
+function renderDirectoryContents(list: HTMLElement, arrived: boolean): void {
   renderFleetStatus();
-  sessionList.replaceChildren();
-  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
+  list.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
   if (sessions.size === 0 && !scopeCoverage().failed &&
     ![...sources.keys()].some(key => sourceAvailability(key).time !== undefined)) {
     emptyState.hidden = true;
@@ -2505,9 +2528,8 @@ function renderDirectoryContents(arrived = false): void {
     renderEmptyState();
     directoryTitle.textContent = "Sessions";
     directoryCount.hidden = true;
-    sessionList.className = "session-list";
-    sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
-    if (arrived) renderAllClear([], [], true);
+    list.className = "session-list";
+    if (arrived) renderAllClear(list, [], [], true);
     return;
   }
 
@@ -2524,9 +2546,9 @@ function renderDirectoryContents(arrived = false): void {
       held.length === 0
         ? `${attentionCount} waiting`
         : `${attentionCount} waiting · ${held.length} held`;
-    sessionList.className = "session-list queue";
-    sessionList.setAttribute("aria-label", "Sessions waiting for input");
-    renderWaitingQueue(waiting, held, working, dismissed);
+    list.className = "session-list queue";
+    list.setAttribute("aria-label", "Sessions waiting for input");
+    renderWaitingQueue(list, waiting, held, working, dismissed);
     return;
   }
 
@@ -2534,9 +2556,8 @@ function renderDirectoryContents(arrived = false): void {
   directoryCount.className = `count-pill ${scopeComplete() ? "count-pill-live" : "count-pill-listed"}`;
   const liveWorkingCount = working.length + dismissed.length;
   directoryCount.textContent = `${scopeComplete() ? "Live" : "Listed"} · ${liveWorkingCount}`;
-  sessionList.className = "session-list all-clear";
-  sessionList.setAttribute("aria-label", scopeComplete() ? "Live OMP sessions" : "Listed OMP sessions");
-  renderAllClear(working, dismissed, arrived);
+  list.className = "session-list all-clear";
+  renderAllClear(list, working, dismissed, arrived);
 }
 
 function setConnectionState(
