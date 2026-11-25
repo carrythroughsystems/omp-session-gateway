@@ -3650,8 +3650,42 @@ function applyEvent(event: SessionEvent, epoch: number): boolean {
   return true;
 }
 
-async function loadSnapshot(epoch: number): Promise<boolean> {
+interface BootSnapshot {
+  readonly epoch: number;
+  readonly controller: AbortController;
+  readonly response: Promise<Response>;
+}
+let bootSnapshot: BootSnapshot | undefined;
+let fleetBootstrap: Promise<void> | undefined;
+
+function requestSnapshot(controller: AbortController): Promise<Response> {
+  return fetch("/api/v1/sessions", {
+    cache: "no-store",
+    credentials: "same-origin",
+    signal: controller.signal,
+  });
+}
+
+function prefetchBootSnapshot(): void {
+  const epoch = directoryEpoch + 1;
   const controller = new AbortController();
+  const response = requestSnapshot(controller);
+  // A rejection before fleet bootstrap settles is still handled by loadSnapshot if it takes ownership.
+  void response.catch(() => undefined);
+  bootSnapshot = { epoch, controller, response };
+}
+
+function discardBootSnapshot(): void {
+  const pending = bootSnapshot;
+  if (pending === undefined) return;
+  bootSnapshot = undefined;
+  pending.controller.abort();
+  // Fetch may already have delivered headers. Release the unread body as well.
+  void pending.response.then(response => response.body?.cancel()).catch(() => undefined);
+}
+
+async function loadSnapshot(epoch: number, prefetched?: BootSnapshot): Promise<boolean> {
+  const controller = prefetched?.controller ?? new AbortController();
   snapshotController = controller;
   let timedOut = false;
   let responseReceived = false;
@@ -3668,20 +3702,23 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     setStatus("loading", "Loading sessions…");
   }
   try {
-    const response = await fetch("/api/v1/sessions", {
-      cache: "no-store",
-      credentials: "same-origin",
-      signal: controller.signal,
-    });
+    const response = await (prefetched?.response ?? requestSnapshot(controller));
     responseReceived = true;
     if (epoch !== directoryEpoch) return false;
-    if (response.status === 403) {
+    if (!response.ok && response.status !== 403) throw new Error("snapshot failed");
+    const payload = response.status === 403 ? undefined : parseSessionListResponse(await response.json());
+    // A lifecycle refresh may finish its request while the initial fleet config is still loading.
+    // Do not publish metadata or withdraw authorization before device-local triage is initialized.
+    if (fleetBootstrap !== undefined) {
+      window.clearTimeout(timeout);
+      await fleetBootstrap;
+    }
+    if (epoch !== directoryEpoch) return false;
+    if (payload === undefined) {
       withdrawLocalAuthorization();
       return false;
     }
-    if (!response.ok) throw new Error("snapshot failed");
-    const payload = parseSessionListResponse(await response.json());
-    if (epoch !== directoryEpoch || payload.revision < directoryRevision) return false;
+    if (payload.revision < directoryRevision) return false;
     directoryRevision = payload.revision;
     // A remote routed load can expire before the first local list arrives. Pin that notice to
     // this first revision so neither bootstrap nor its identical opening SSE snapshot erases it.
@@ -3698,6 +3735,10 @@ async function loadSnapshot(epoch: number): Promise<boolean> {
     if (!notificationRouteStatusLocked) setStatus("ready", "");
     return true;
   } catch {
+    if (fleetBootstrap !== undefined) {
+      window.clearTimeout(timeout);
+      await fleetBootstrap;
+    }
     if (epoch !== directoryEpoch || (controller.signal.aborted && !timedOut)) return false;
     localFresh = false;
     render();
@@ -3884,11 +3925,18 @@ async function resolvePendingNotificationRoute(): Promise<void> {
 }
 
 let fleetRecovery: Promise<void> | undefined;
-async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
+async function refreshAndConnect(resetBackoff = true, prefetched?: BootSnapshot): Promise<boolean> {
   updateRemoteVisibility();
   if (resetBackoff) reconnectAttempt = 0;
   clearReconnectTimeout();
   const epoch = directoryEpoch + 1;
+  if (prefetched !== undefined && prefetched === bootSnapshot && prefetched.epoch === epoch &&
+    !prefetched.controller.signal.aborted) {
+    bootSnapshot = undefined;
+  } else {
+    discardBootSnapshot();
+    prefetched = undefined;
+  }
   directoryEpoch = epoch;
   directoryRevision = -1;
   snapshotController?.abort();
@@ -3897,7 +3945,7 @@ async function refreshAndConnect(resetBackoff = true): Promise<boolean> {
   events = undefined;
   clearEventLiveness();
   eventStreamStale = false;
-  const loaded = await loadSnapshot(epoch);
+  const loaded = await loadSnapshot(epoch, prefetched);
   if (loaded && epoch === directoryEpoch) {
     if (fleetBootstrapFailed) {
       fleetRecovery ??= initializeFleet().finally(() => { fleetRecovery = undefined; });
@@ -4006,6 +4054,7 @@ window.addEventListener("offline", () => {
   for (const remote of remotes.values()) remote.interrupt();
   directoryEpoch += 1;
   directoryRevision = -1;
+  discardBootSnapshot();
   snapshotController?.abort();
   snapshotController = undefined;
   events?.close();
@@ -4036,6 +4085,7 @@ document.addEventListener("freeze", () => {
   for (const remote of remotes.values()) remote.setVisible(false);
   directoryEpoch += 1;
   directoryRevision = -1;
+  discardBootSnapshot();
   snapshotController?.abort();
   snapshotController = undefined;
   events?.close();
@@ -4080,8 +4130,10 @@ document.addEventListener("visibilitychange", () => {
 });
 
 const applicationWorkerRegistration = initializeApplicationWorker();
-const fleetReady = initializeFleet();
+const fleetReady = fleetBootstrap = initializeFleet();
+prefetchBootSnapshot();
 void initializeNotifications(applicationWorkerRegistration, fleetReady);
 await fleetReady;
+fleetBootstrap = undefined;
 if (pendingNotificationLaunch?.source !== undefined) void resolvePendingNotificationRoute();
-await refreshAndConnect();
+if (bootSnapshot !== undefined) await refreshAndConnect(true, bootSnapshot);
