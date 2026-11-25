@@ -1,0 +1,1 @@
+- Run independent `omp-gateway doctor` probes concurrently to shorten diagnostics.
