@@ -388,6 +388,47 @@ permitted. See the [ADR-043 amendment](DECISIONS.md#2026-11-07-amendment--admini
 These observations are **not** an effectful two-window creation smoke, platform support
 expansion, or release qualification; the effectful smoke remains pending.
 
+<a id="tern-0933-creation-re-baseline-observation"></a>
+### 2026-11-24 Tern 0.9.33 creation re-baseline observation
+
+Hand-run CLI probes on one macOS (Apple silicon) developer workstation used Tern `0.9.33`
+(`3a79092`). Most ran in a throwaway Tern session that the window was not showing; one ran the
+exact command the gateway uses to create a session
+(`tern new tab --json --keep-open --cwd <dir> -- <argv…>`) in the session the window was
+showing. No gateway creation request ran: parser results below come from running the v0.12.0
+gateway parsers on the captured output. Every probe tab and session was closed afterwards.
+
+- **Receipt:** `tern new tab --json` printed
+  `{"session": <uint64>, "tab": <uint64>, "block": <uint64>}` with exit status `0` and empty
+  stderr; Tern `0.9.5` printed `{"block": <uint64>}` alone. The gateway's receipt parser
+  accepts the new shape and returns the `block` ID. The new tab opened in the background: the
+  window kept showing the same tab, and the focused block did not change.
+- **Exit status:** `tern inspect --json` reports `exited` on each block in
+  `sessions[].tabs[].blocks[]` and on its `panes[]` row: `null` while the program runs, its
+  exit status once it ends. Without `--keep-open`, a block whose program exits `0` closes and
+  one that exits non-zero stays; with `--keep-open`, both stay, and the block's `live` field
+  stays `true` after the exit. Tern runs the command through the user's login shell, so a
+  missing executable shows as exit status `127`, not as a failed launch.
+- **`--end-on-success`:** Installed help states that with this flag a program exiting with
+  status `0` ends its whole Tern session, and windows showing that session go back to the one
+  they showed before.
+- **Other blocks:** A file block (`tern open --tab FILE`) is listed in
+  `sessions[].tabs[].blocks[]` with a `file` key and no `panes[]` row; the gateway's inspection
+  parser accepts the document. A parked browser block (a page opened by `tern browser` with
+  `"show": false`, never on screen) does not appear in `tern inspect --json`;
+  `tern browser '{"op":"blocks"}'` lists it.
+- **Long arguments:** A tab started by hand with one command argument longer than 8,192 bytes,
+  the v0.12.0 parser's per-string limit, made that parser reject the whole
+  `tern inspect --json` document; after that tab closed, the window's document parsed again.
+  In gateway v0.13.0 the inspection parser no longer applies that limit to strings it does not
+  read.
+
+These are developer-workstation observations, not a CI lane or release qualification
+([Status vocabulary](#status-vocabulary)); they add no **Tested**, **Supported**, or
+**Qualified** status. Not established: creation while Tern's session daemon runs with no
+window open, a window showing a remote host's session, and Tern builds older than `0.9.33`
+such as `0.9.30`.
+
 ## Device-cloud allocation observations
 
 ### 2026-10-20 BrowserStack allocation probes

@@ -126,6 +126,8 @@ Relay transport and client media handling enforce these boundaries:
 
 JavaScript strings cannot be reliably zeroized; minimize lifetime, copies, closures, global state, and references instead of claiming memory erasure.
 
+Do not open **OMP Sessions**, **View**, or **Control** in a Tern browser block, the web page Tern can show in a pane or as a floating picture in picture. Tern's browser automation, shared by the `tern browser` command, Tern plugins, and Carly (Tern's in-app assistant), lists every browser block in a window, the user's own included, and its operations accept any of them: `eval` runs a function in the page and `snapshot` reads the page's DOM. Anything that can drive that automation can therefore run script in the page, which reaches the capability the collaboration client holds in memory, so a capability in such a page is no longer confined to the places listed above.
+
 The pinned client ([Embedded integration](../packages/collab-client/README.md#embedded-integration)) keeps this capability boundary across coalesced renders and request-tray expansion: expanding reparents the mounted shell without fetching a second link, tray descriptors, DOM attributes, and history state hold no capability, closing or `pagehide` disposes synchronously, and bfcache resume revalidates metadata first ([OMP Sessions PWA](ARCHITECTURE.md#14-omp-sessions-pwa)).
 
 Settled and streaming Markdown pass links and image sources through the browser URL scheme sanitizer (HTTP(S) and relative only for images), raw HTML stays escaped, KaTeX renders MathML with `trust: false` and `maxSize: 100`, and only pure TypeScript parser sources are vendored without `pi-utils` or `pi-natives` runtime dependencies.
