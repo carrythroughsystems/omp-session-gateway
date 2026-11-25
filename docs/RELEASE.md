@@ -410,6 +410,8 @@ Campaign prerequisites across the Studio controller, Mac guest, Pixel, and cloud
 - Malformed or duplicate GCM lines fail without cycling Wi-Fi, in-window disconnect fails as `gcm_disconnected` (`infra_transient`), and timeouts fail as harness deadlines (both stop in `diagnostic-required` without retry while restoring radios); schema-3 `gcmConnected` and `gcmRemedyApplied` booleans record on pass and fail, keeping censored samples only in the private cause chain.
 - Readiness reads `GET /api/v1/push/config` and requires `subscriptionCount === 1` on the disposable Mac gateway (`0` fails as missing prerequisite; `> 1` fails as `stale_subscriptions` without exposing endpoints or auto-deleting subscriptions) alongside positive matching `sendCount` and `ackCount`, presentation, and clear.
 
+`--preflight` does not prove that the hosted Debian workflow's secrets are still valid. Before arming, dispatch `droplet-qualification.yml` with `credentials_only=true` ([Linux qualification, section 9.1](LINUX_QUALIFICATION.md#91-secrets-to-configure-first)); it registers no SSH key and creates no droplet.
+
 To recover `stale_subscriptions`, keep the driver disabled and finish Pixel and Mac restoration first (`scripts/qualify-macos-host.sh omp-clean uninstall` removes the fixture and service while leaving `~/.local/state/omp-session-gateway/push-state.json` intact). Turn off notifications from known stale browsers (`DELETE /api/v1/push/subscription`) while the gateway runs, or reset all subscriptions on the stopped disposable Mac guest (`jq` required):
 
 ```sh
