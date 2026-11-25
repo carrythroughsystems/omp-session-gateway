@@ -90,7 +90,7 @@ The optional **First task** (at most 8,000 Unicode code points and 32 KiB) stays
 
 From the repository root, `bun run test:visual` builds `apps/web/dist/` and runs `visual/dashboard.visual.ts` (`playwright.visual.config.ts`) across 21 deterministic synthetic snapshots (seven states at `390×844`, `810×1080`, and `1280×800`) from `e2e/synthetic-product-fixture.ts` without starting Percy or requiring a token (`visual/snapshot-safety.test.ts` checks the serializer guards).
 
-`bun run test:visual:percy` uploads those 21 guarded snapshots when `PERCY_TOKEN` and native Node.js (24.22.0 LTS in CI) are on `PATH` for the Percy CLI while builds and workers run on Bun 1.4.4; serialization guards and preflight rules are in [BrowserStack and Percy visual review](../../docs/BROWSERSTACK.md).
+`bun run test:visual:percy` uploads those 21 guarded snapshots when `PERCY_TOKEN` and native Node.js (24.22.0 LTS in CI) are on `PATH` for the Percy CLI while builds and workers run on Bun 1.4.5; serialization guards and preflight rules are in [BrowserStack and Percy visual review](../../docs/BROWSERSTACK.md).
 
 ## Tests
 

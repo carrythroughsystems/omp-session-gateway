@@ -4,7 +4,7 @@ This guide is for administrators upgrading a running OMP Session Gateway, rollin
 
 ## Upgrade the gateway
 
-Upgrades from `v0.4.0` and later run in place over the active user service. Confirm `bun --version` prints `1.4.4` and keep that Bun `1.4.4` binary at a persistent path on the host because `install` writes that exact Bun executable into the LaunchAgent, `systemd` user unit, or Windows scheduled task.
+Upgrades from `v0.4.0` and later run in place over the active user service. For v0.13.0, confirm `bun --version` reports `1.4.5` or newer. Run `install` with that Bun at a persistent path: the LaunchAgent, `systemd` user unit, or Windows scheduled task records the exact executable running the command. Installing a new Bun elsewhere or changing `PATH` alone does not move an existing service to it.
 
 Below, `omp-gateway <command>` is shorthand for `bun apps/gateway/src/cli.js <command>` run from the extracted release directory.
 
@@ -53,7 +53,7 @@ bun apps/gateway/src/cli.js rollback --to <version>-<digest12>
 
 Each readiness-proven `install` keeps the active runtime plus the two most recent distinct predecessors in `installation/history.json` (plus any divergent version named by the on-disk service definition) and prunes older or never-activated staged directories. `rollback` never prunes, so you can switch back and forth between retained versions; if a version was pruned, verify and `install` its release archive again.
 
-Confirm `bun --version` is `1.4.4` before running `rollback`: `rollback` rewrites the service definition with the Bun executable running the command and does not restore an older Bun binary.
+After upgrading to v0.13.0, run `rollback` with the same persistent Bun used to install it (`1.4.5` or newer). `rollback` switches the gateway payload and rewrites the service definition with the Bun executable running the command. It does not restore the predecessor's Bun or transfer the predecessor's qualification to a different Bun version.
 
 ### Tern creation on every managed rollback
 

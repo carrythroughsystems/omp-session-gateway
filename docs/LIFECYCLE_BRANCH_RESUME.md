@@ -32,7 +32,7 @@ The [upstream canary workflow](../.github/workflows/upstream-canary.yml) runs [`
 
 Scheduled `canary` or `canary-windows` failures on `main` open or update the `upstream-canary` issue without copying raw logs (`inspect-client-drift` separately manages `client-drift` issues; [Source drift report and refresh](../packages/collab-client/README.md#source-drift-report-and-refresh)). Review the run's step summary (`requestedOmpVersion`, `resolvedOmpVersion`, `bunVersion`, `bunEngine`, `failedStage`, and stage statuses) and re-run with `workflow_dispatch` after fixing or pinning.
 
-Before running the canary locally, run `bun install --frozen-lockfile` in the repository, install Bun matching `engines.bun` in the target OMP package (`1.4.4` in CI), stage `@oh-my-pi/pi-coding-agent` in an isolated directory (`bun add --exact "@oh-my-pi/pi-coding-agent@<version>"`) so its `package.json` sits two directories above `dist/cli.js`, and ensure `tmux` (Linux and macOS) or `powershell.exe` and `taskkill.exe` (Windows) are on `PATH`.
+Before running the canary locally, run `bun install --frozen-lockfile` in the repository, install Bun matching `engines.bun` in the target OMP package (`1.4.5` in CI), stage `@oh-my-pi/pi-coding-agent` in an isolated directory (`bun add --exact "@oh-my-pi/pi-coding-agent@<version>"`) so its `package.json` sits two directories above `dist/cli.js`, and ensure `tmux` (Linux and macOS) or `powershell.exe` and `taskkill.exe` (Windows) are on `PATH`.
 
 1. Run the canary against the staged OMP entrypoint ([`scripts/omp-fixture.ts`](../scripts/omp-fixture.ts) supplies a synthetic model key and `OMP_SKIP_SETUP=1`, so no live provider credentials are needed; pass `--model <provider/id>` only to test an alternate model ID during diagnosis):
 
@@ -62,7 +62,7 @@ On Windows (`platform: "windows"`), the hidden console has no keystroke transpor
 
 Before a release campaign, rehearse the lifecycle step locally on macOS (`darwin`) with [`scripts/omp-lifecycle-development.ts`](../scripts/omp-lifecycle-development.ts).
 
-Prerequisites are `bun install --frozen-lockfile`, Bun `1.4.4`, `python3` (for `pty.fork`), built web assets at `apps/web/dist/index.html`, an absolute path to a stock OMP binary or `dist/cli.js` matching `packageVersion` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), and `bunx playwright install chromium` when passing `--isolated-home`.
+Prerequisites are `bun install --frozen-lockfile`, Bun `1.4.5`, `python3` (for `pty.fork`), built web assets at `apps/web/dist/index.html`, an absolute path to a stock OMP binary or `dist/cli.js` matching `packageVersion` in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json), and `bunx playwright install chromium` when passing `--isolated-home`.
 
 1. Build the web bundle if `apps/web/dist/index.html` is missing ([Build from source](../CONTRIBUTING.md#build-from-source)):
 

@@ -2258,7 +2258,8 @@ or emulated result acquires a new qualification claim.
 
 ## ADR-046 — Bun 1.4.4 toolchain and release runtime floor
 
-**Status:** Accepted; amends only the Bun prerequisite in ADR-028
+**Status:** Accepted; amends only the Bun prerequisite in ADR-028.
+The Bun pin is amended by [ADR-050](#adr-050--bun-145-toolchain-and-release-runtime-floor).
 
 **Date:** 2026-10-30
 
@@ -2696,3 +2697,38 @@ dot and the first-run primary action), which degrade to the default presentation
 baseline, README media, site, and social card all change together with this decision. The
 collaboration client's transcript rendering, the tray module's behavior, the motion gate, and
 every security invariant are untouched.
+
+---
+
+## ADR-050 — Bun 1.4.5 toolchain and release runtime floor
+
+**Status:** Accepted; amends the Bun pin in
+[ADR-046](#adr-046--bun-144-toolchain-and-release-runtime-floor)
+
+**Date:** 2026-11-24
+
+**Context:** The founder chose to keep the release runtime on Bun's latest stable release,
+[Bun 1.4.5](https://bun.com/blog/bun-v1.4.5), published 2026-11-19. Bun describes it as a security
+release that updates lsquic, c-ares, SQLite, llhttp and BoringSSL, with fixes for HTTP/3, TLS and
+DNS. The affected surfaces it lists include HTTP/1.1, `Bun.serve`, `fetch`, `node:https` and
+`node:zlib`, which the gateway uses; HTTP/3 is not enabled on the loopback listener. The notes name
+no advisory identifiers, and no defect observed in 1.4.4 prompted the move.
+
+**Decision:** Pin the development and release toolchains, Bun types, CI setups and version checks,
+and qualification runtimes to **1.4.5**. `package.json` `packageManager` remains the source of truth
+for the release builder and driver. Update the generated locks, upstream and Windows qualification
+pins (including the Windows archive digest), and Studio LaunchAgent template. The engineering OMP
+baseline and embedded client provenance do not change.
+
+**Consequences:**
+
+- The v0.13.0 archive's `engines.bun` and `release-info.json` runtime declare **Bun `>=1.4.5`**,
+  so installing it needs Bun 1.4.5 or newer. Qualify every lane on the exact 1.4.5 pin before
+  promotion. Published v0.12.0 keeps its Bun 1.4.4 qualification.
+- Before the next campaign, checksum-verify the Studio lane toolchain, regenerate the installed
+  release-driver plist while drained, and seed `~/.local/lib/omp-session-gateway/bun/v1.4.5/bun`.
+  Prepare the retained Mac, Linux provisioner and Windows guest from the new pins
+  ([host preparation](RELEASE.md#bun-145-host-preparation-before-the-next-campaign)).
+- `install` records the exact Bun executable running it, so re-run `install` under the intended
+  persistent Bun to move an existing service. `rollback` selects a retained gateway payload and
+  uses the Bun running the rollback command, not the predecessor's original Bun.

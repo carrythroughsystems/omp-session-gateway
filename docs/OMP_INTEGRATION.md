@@ -6,14 +6,14 @@ This guide tells integrators and contributors what OMP Session Gateway requires 
 
 Stock mainline OMP `>= 18.1.20` is the only OMP prerequisite: no fork, custom OMP build, gateway-specific OMP plugin, or second OMP executable is used. The gateway consumes OMP's local registry without patching OMP or importing private controller APIs; releases earlier than `18.1.20` lack this registry and are unsupported.
 
-Production deployment requires Bun `1.4.4`, TUN-mode Tailscale Serve, an exact login allowlist (`auth.allowedLogins`; [Installation and operations](OPERATIONS.md)), and the one-time `collab.autoStart` setting below.
+Production deployment requires Bun `>=1.4.5` for v0.13.0, TUN-mode Tailscale Serve, an exact login allowlist (`auth.allowedLogins`; [Installation and operations](OPERATIONS.md)), and the one-time `collab.autoStart` setting below.
 
 | Surface | Pin or contract | Notes |
 |---|---|---|
 | Stock mainline OMP host | `>= 18.1.20` | Minimum OMP version supplying the native local registry (`collab.autoStart`). |
 | Engineering host baseline | `v19.1.1` (`31ffee513f27a01bba7d4dfbe12bae239cdc646a`) | Exact OMP commit and Git tree (`3f27b6346d6319234bcd91d8148c15d077cea436`) in [`UPSTREAM.lock.json`](../UPSTREAM.lock.json) ([Baseline review record](UPSTREAM_STRATEGY.md#baseline-review-record)). |
 | Embedded browser client | `v19.1.1` (`@oh-my-pi/collab-web` `16.3.6`, `@oh-my-pi/pi-wire` `19.1.1`) | Provenance pin in [`packages/collab-client`](../packages/collab-client/README.md): independent `collab-web` source, wire dependency, and vendored `pi-utils` helper provenance, with bounded resync rejoin and older-host rendering retained. |
-| Gateway runtime | Bun `1.4.4` | Required runtime for `omp-gateway` (the CLI), `omp-gatewayd` (the daemon), and release archives. |
+| Gateway runtime | Bun `>=1.4.5` | Runtime floor for `omp-gateway` (the CLI), `omp-gatewayd` (the daemon), and v0.13.0 release archives. |
 
 For the latest release and its qualified hardware matrix, see [Current claim](COMPATIBILITY.md#current-claim) and [Release status](RELEASE_STATUS.md).
 

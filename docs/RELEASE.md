@@ -14,7 +14,7 @@ The repository builds Bun-runtime release candidates (`pre-alpha`) and promotes 
 
 ## Mainline stable release procedure
 
-Each step below is a separate effect; a candidate, a passed receipt, or an approved lock never promotes itself. Before starting, confirm a clean checkout of `main` matching `origin/main` (`qualify:stable` refuses detached or unpublished commits), place pinned Bun `1.4.4` first on `PATH`, drain the [merge queue](#merge-queue) and pause new enqueues until Step 6 lands, and verify that no [unattended release driver](#unattended-release-driver) campaign or smoke is active.
+Each step below is a separate effect; a candidate, a passed receipt, or an approved lock never promotes itself. Before starting, confirm a clean checkout of `main` matching `origin/main` (`qualify:stable` refuses detached or unpublished commits), place pinned Bun `1.4.5` first on `PATH`, drain the [merge queue](#merge-queue) and pause new enqueues until Step 6 lands, and verify that no [unattended release driver](#unattended-release-driver) campaign or smoke is active.
 
 The manual path requires an explicit maintainer decision for scope, live qualification, promotion, publication, and published-byte smoke. The unattended driver holds standing routine authority for those steps within its requested `patch` or `minor` release class and resource caps, without per-release approval prompts.
 
@@ -152,13 +152,13 @@ Prerequisites match the full campaign and smoke:
 
 - Retained macOS guest (`VirtualMac2,1`) running and reachable over SSH, attached Pixel with the **OMP Sessions** WebAPK installed, published predecessor installed on the Studio, and empty-password `~/Library/Keychains/omp-qualification.keychain-db` (unlocked by the driver before campaign Pixel work and before smoke).
 - Private mode-`0600` credential files owned by `gwops`: `~/.ssh/omp-gateway-release-signing`, `~/.vultr-apikey`, `~/.ts-qual-apikey`, `~/.ts-qual-authkey` (or `~/.ts-authkey-qual`), and `~/.local/state/omp-session-gateway/op-service-account.token`.
-- Pinned Darwin-arm64 Bun `1.4.4` at `~/.omp/lane-toolchain/bun-1.4.4/bin/bun` (seeded from the checksum-verified `oven-sh/bun` release; see [Bun 1.4.4 host preparation](#bun-144-host-preparation-before-the-next-campaign)), `/opt/homebrew/opt/openjdk@17/bin/java`, `adb`, `security`, `git`, `gh`, `cosign`, `shasum`, `ssh`, `scp`, `bash`, `python3`, `curl`, `tmux`, and `op` on the explicit Homebrew `PATH`, with older launchers drained while retaining receipts and `lease.sqlite`.
+- Pinned Darwin-arm64 Bun `1.4.5` at `~/.omp/lane-toolchain/bun-1.4.5/bin/bun` (seeded from the checksum-verified `oven-sh/bun` release; see [Bun 1.4.5 host preparation](#bun-145-host-preparation-before-the-next-campaign)), `/opt/homebrew/opt/openjdk@17/bin/java`, `adb`, `security`, `git`, `gh`, `cosign`, `shasum`, `ssh`, `scp`, `bash`, `python3`, `curl`, `tmux`, and `op` on the explicit Homebrew `PATH`, with older launchers drained while retaining receipts and `lease.sqlite`.
 
 Disable admission and unload the LaunchAgent before mutating the checkout, and stop after the inspection commands if any worker, `tmux` session, unsettled intent or outbox, or `lease.sqlite` owner is present. Finish or recover an active release on its existing policy first; never advance the checkout underneath an in-progress release or delete `lease.sqlite` to proceed.
 
 SSH to the Studio as the operator (for example `ssh gwops@studio.example.ts.net`) and run:
 ```sh
-export PATH="$HOME/.omp/lane-toolchain/bun-1.4.4/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$HOME/.omp/lane-toolchain/bun-1.4.5/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 state="$HOME/.local/state/omp-session-gateway/release-driver"
 install -d -m 700 "$state"
 touch "$state/disabled"
@@ -216,7 +216,7 @@ bun scripts/release-driver.ts status
 
 `plan` reports readiness alongside its proposed next operation (and can read GitHub with an operator `gh` session while checking machine readiness against `OMP_RELEASE_GH_CONFIG_DIR`); `status` reports `phase`, `candidate`, unsettled `intent` or `announcement` outbox, typed `holdReason`, and any first unreviewed source commit.
 
-Readiness checks private file ownership and `0600` modes, required executables, pinned Darwin-arm64 Bun `1.4.4`, `OMP_STABLE_MAC_HOST` configuration and SSH reachability, one authorized `adb` device, bot login and `push` permission, writer-readable branch-protection contexts on `/branches/main` (admin-only fields come from `ROUTINE_BRANCH_PROTECTION`), `disabled` and `dry-run` switches, and `lease.sqlite`.
+Readiness checks private file ownership and `0600` modes, required executables, pinned Darwin-arm64 Bun `1.4.5`, `OMP_STABLE_MAC_HOST` configuration and SSH reachability, one authorized `adb` device, bot login and `push` permission, writer-readable branch-protection contexts on `/branches/main` (admin-only fields come from `ROUTINE_BRANCH_PROTECTION`), `disabled` and `dry-run` switches, and `lease.sqlite`.
 
 Ordinary `tick` runs write sanitized `readiness.json` before admitting a request and leave requests unconsumed when any check is false, persisting no raw credentials, device serials, or HTTP headers.
 
@@ -350,7 +350,7 @@ Predecessor verification in `scripts/post-release-smoke.ts` has one finite histo
 
 Its signed tag, six-asset set, Latest state, checksums, and archive digest remain mandatory; candidates, published-byte smokes, and all other predecessors require all three online GitHub build attestations, and attestation outages or digest mismatches fail closed.
 
-Before spending a full campaign after harness or lane changes, exercise affected lanes in development mode at the exact orchestrator tree under pinned Bun `1.4.4`:
+Before spending a full campaign after harness or lane changes, exercise affected lanes in development mode at the exact orchestrator tree under pinned Bun `1.4.5`:
 
 - Background Push: `OMP_PUSH_FIXTURE_BINARY="$PINNED_OMP" bun scripts/android-push-qualification.ts development <published archive>`, where `OMP_PUSH_FIXTURE_BINARY` names the exact stock OMP entrypoint (`dist/cli.js` or binary) matching `UPSTREAM.lock.json` ([Physical background-Push lane](ANDROID.md#physical-background-push-lane)).
 - OMP session lifecycle: `bun scripts/omp-lifecycle-development.ts --omp <absolute path to stock OMP dist/cli.js>` ([OMP session lifecycle lane](LIFECYCLE_BRANCH_RESUME.md)).
@@ -393,7 +393,7 @@ Campaign prerequisites across the Studio controller, Mac guest, Pixel, and cloud
   ```
 
 - Mac guest login and toolchain: the SSH account (standard or admin; FileVault off if bare-metal) must auto-login to `gui/<uid>` Aqua after reboot so persistence records `yes` for `guest reboot changed` (`kern.bootsessionuuid`), `console login`, and `readiness token preserved` with green `doctor`.
-- Mac guest `PATH` and OMP: install Bun `1.4.4` in `~/.bun/bin`, stock OMP `>= 18.1.20` (`packageVersions["@oh-my-pi/pi-coding-agent"]` from `UPSTREAM.lock.json`) on `PATH`, and user-owned TUN-mode Tailscale (remote commands use `/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin` and explicit staged `cosign` paths).
+- Mac guest `PATH` and OMP: install Bun `1.4.5` in `~/.bun/bin`, stock OMP `>= 18.1.20` (`packageVersions["@oh-my-pi/pi-coding-agent"]` from `UPSTREAM.lock.json`) on `PATH`, and user-owned TUN-mode Tailscale (remote commands use `/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$HOME/.bun/bin:$HOME/go/bin` and explicit staged `cosign` paths).
 - Mac guest sudo: when `OMP_STABLE_MAC_SUDO_PASSWORD_FILE` is unset, the orchestrator passes empty `OMP_MAC_SUDO_PW` and `sudo -n` must allow `true`, `/usr/local/bin/tailscale` (or `PATH` fallback) `status --json`, `set --operator=<SSH account>`, `cert --cert-file <home>/omp-qual.crt --key-file <home>/omp-qual.key <tailnet DNS name>`, and `shutdown -r now` (bare-metal hosts such as `Mac14,3` may supply a `0600` single-line `OMP_STABLE_MAC_SUDO_PASSWORD_FILE` over SSH stdin).
 - Mac guest optional `reboot-guard`: on shared hosts, an owner-executable regular file `$HOME/.config/omp-qualification/reboot-guard` (validated without executing during `--preflight`) runs immediately before `shutdown -r now` and aborts persistence with `the host's reboot guard refused: <output>` (first 400 bytes) on nonzero exit.
 - Windows lane: `0600` `~/.vultr-apikey` (admitting the Studio's egress `/32`), `~/.ts-qual-apikey`, `~/.ts-qual-authkey` (or `~/.ts-authkey-qual`), and tools pinned in `scripts/windows-qualification-pins.json` ([Windows qualification](WINDOWS_QUALIFICATION.md)).
@@ -475,7 +475,7 @@ Keep the original `0600` progress checkpoint (inside its `0700` directory; never
 - Milestones `audited`, `recordRemovalStarted` (checkpointed before `DELETE` so crash recovery checks absence without re-sending `DELETE`, and post-`DELETE` `404`s keep prior audits), `recordDeleted`, and `recordRemoved` advance monotonically, normalizing legacy inventories to the last URL per origin/path and reporting closed codes plus removed-under-incident status.
 - Crash cleanup re-audits finalized surfaces only when live and fixture OMP generations match; otherwise it deletes records and increments `unauditedRecordsDeleted` without marking them audited.
 
-To run a non-qualifying mixed-vendor development check (private **Tested** evidence only; confirm no campaign, Pixel task, or Mac guest work overlaps, and put pinned Bun `1.4.4` first on `PATH`):
+To run a non-qualifying mixed-vendor development check (private **Tested** evidence only; confirm no campaign, Pixel task, or Mac guest work overlaps, and put pinned Bun `1.4.5` first on `PATH`):
 
 ```sh
 bun scripts/device-cloud-development.ts \
@@ -575,7 +575,7 @@ After `.github/workflows/signed-release.yml` publishes a stable release, run `sm
 
 Prerequisites before running `smoke:release`:
 
-- Run under pinned Bun `1.4.4` (`package.json` `packageManager`) with `gh`, `cosign`, `git`, `shasum`, `tar`, `plutil`, `tailscale`, `tmux`, and `adb` on `PATH` as `tailscaled`'s Studio operator, with an existing `tailscale-serve` gateway (`auth.allowedLogins` non-empty; on a fresh host, install the published predecessor first), private `config.json` and `readiness-token`, and the Pixel PIN in `~/Library/Keychains/omp-qualification.keychain-db`.
+- Run under the Bun pinned in the matching checkout's `package.json` (`1.4.5` for v0.13.0) with `gh`, `cosign`, `git`, `shasum`, `tar`, `plutil`, `tailscale`, `tmux`, and `adb` on `PATH` as `tailscaled`'s Studio operator, with an existing `tailscale-serve` gateway (`auth.allowedLogins` non-empty; on a fresh host, install the published predecessor first), private `config.json` and `readiness-token`, and the Pixel PIN in `~/Library/Keychains/omp-qualification.keychain-db`.
 - Connect one authorized `adb` device (disconnect others; no `OMP_ANDROID_SERIAL` override exists) with the **OMP Sessions** WebAPK installed for the Studio origin, tethering off, and the one-time Tailscale (`com.tailscale.ipn`) Doze exemption set ([Device admission and one-time WebAPK setup](ANDROID.md#device-admission-and-one-time-webapk-setup), checked read-only before downloads or host changes). Do Not Disturb and Bedtime may stay on because smoke does not test notifications.
 
 Preview bounded effects read-only (`--plan` claims no lease and makes no network, service, Tailscale, OMP, or Android changes), then run the smoke with the verified archive SHA-256:
@@ -589,9 +589,9 @@ Optional flags are `--repo <owner/name>` (default `carrythroughsystems/omp-sessi
 
 Under the shared `smoke:<repository>:<tag>` lock in `~/.local/state/omp-session-gateway/release-host/lease.sqlite`, `smoke:release` executes these steps in order:
 
-1. Downloads all six release assets, checks `SHA256SUMS`, confirms GitHub Latest state and API digests, verifies all three Cosign Sigstore bundles and three GitHub build attestations (honoring `HISTORICAL_RELEASE_TAGS` signer identity), checks local and GitHub verified annotated tags and `origin/main` ancestry, matches `--archive-sha256`, and validates `release-info.json`, `/assets/app.<hash>.js`, and `UPSTREAM.lock.json` (`>= 18.1.20` and Bun `1.4.4`).
+1. Downloads all six release assets, checks `SHA256SUMS`, confirms GitHub Latest state and API digests, verifies all three Cosign Sigstore bundles and three GitHub build attestations (honoring `HISTORICAL_RELEASE_TAGS` signer identity), checks local and GitHub verified annotated tags and `origin/main` ancestry, matches `--archive-sha256`, and validates `release-info.json`, `/assets/app.<hash>.js`, and `UPSTREAM.lock.json` (OMP `>= 18.1.20` and Bun matching the checkout's pin).
    - During publication, `signed-release.yml` also validates draft and published flags plus all six uploaded digests across `0`/`2`/`4`/`8`-second retries, deleting the draft or release if verification fails while leaving the signed tag for diagnosis and any already-public attestations or Rekor entries as failed-attempt provenance.
-2. Seeds or verifies `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` (`0755`), then selects `omp` on `PATH` when its `realpath` resolves inside `@oh-my-pi/pi-coding-agent` or falls back to Bun's global install (installing the pinned version when absent or `--rebuild-omp` is set) so non-stock launchers such as Code Mode are never used, refusing before any gateway change unless stock mainline `>= 18.1.20` has readable `collab.autoStart`.
+2. Seeds or verifies `~/.local/lib/omp-session-gateway/bun/v<version>/bun` (`0755`), using the archive's Bun pin. Then selects `omp` on `PATH` when its `realpath` resolves inside `@oh-my-pi/pi-coding-agent` or falls back to Bun's global install (installing the pinned version when absent or `--rebuild-omp` is set) so non-stock launchers such as Code Mode are never used, refusing before any gateway change unless stock mainline `>= 18.1.20` has readable `collab.autoStart`.
 3. Installs (when version, commit, LaunchAgent Bun path, or `--force-reinstall` requires it) through the persistent Bun executable, proves `config.json` and `readiness-token` remained byte-identical, ensures the gateway's Tailscale Serve HTTPS mapping while verifying all unrelated Serve mappings are unchanged, and requires `status` (`installed`, `active`, `ready`, `diverged: false`) and every `doctor` check to pass.
 4. Sets `collab.autoStart` to `control` (verified by read-back), creates `~/omp-post-release-<version>-<nonce>` with a `0600` `.omp-session-gateway-post-release-smoke` marker, and starts a detached `tmux` fixture using `scripts/omp-fixture.json` and `OMP_SKIP_SETUP=1` (must publish with a model within 90 seconds; non-eligible targets fail closed), then runs `android-collab-smoke.ts`, `android-leak-sweep.ts`, `android-acceptance.ts`, and WebAPK verification:
    - Acceptance admits reachability when ICMP succeeds or, when host firewall stealth drops ICMP, when an owned Chrome/CDP disposable tab navigates top-level to credential-free `/api/v1/health` within 15 seconds (`2xx`, exact URL, `status` `ready` or `degraded`, `no-store`, service worker bypassed; `android-reachability` logs `satisfiedBy` as `icmp`, `https`, or `null` to private stderr, while qualification `--preflight` stays ICMP-only).
@@ -1062,46 +1062,46 @@ orders/owned PRs. It also addresses comments, PR creation/merges and pushes with
 write redirect behavior is not a cutover guarantee. No state/receipt rewriting is needed for a
 drained driver: historical URLs are evidence, not dispatch targets.
 
-### Bun 1.4.4 host preparation (before the next campaign)
+### Bun 1.4.5 host preparation (before the next campaign)
 
 This repository move is not a host deployment or a new qualification. Keep the Studio driver
 disabled and unloaded, with no campaign, worker or shared lease active, throughout toolchain and
 checkout preparation. Do not mutate a pending release's runtime or policy.
 
-For a published-byte smoke of a pre-move release such as v0.9.0, use a pre-move harness checkout
-under Bun 1.4.0, following the [matching-release recovery-checkout pattern](#post-release-local-installation-smoke).
-`post-release-smoke` derives the expected archive runtime and required running Bun from that
+For a [published-byte smoke](#post-release-local-installation-smoke) of an earlier release, use its
+matching release tooling checkout and Bun pin: v0.12.0 uses Bun 1.4.4, and v0.9.0 uses Bun 1.4.0.
+`post-release-smoke` derives the expected archive runtime and required running Bun from the
 checkout's `packageManager`, not from the release tag alone.
 
 1. As Studio `gwops`, install the official Darwin-arm64 binary at
-   `~/.omp/lane-toolchain/bun-1.4.4/bin/bun`, verifying the downloaded zip against the same
+   `~/.omp/lane-toolchain/bun-1.4.5/bin/bun`, verifying the downloaded zip against the same
    release's `SHASUMS256.txt` before extracting it. Seed the persistent runtime used by Android
    and Windows controller commands from that verified binary, rather than waiting for a smoke:
 
    ```sh
-   toolchain="$HOME/.omp/lane-toolchain/bun-1.4.4"
+   toolchain="$HOME/.omp/lane-toolchain/bun-1.4.5"
    download="$(mktemp -d)"
    (
      set -euo pipefail
-     persistent="$HOME/.local/lib/omp-session-gateway/bun/v1.4.4"
+     persistent="$HOME/.local/lib/omp-session-gateway/bun/v1.4.5"
      cd "$download" &&
-     gh release download bun-v1.4.4 -R oven-sh/bun \
+     gh release download bun-v1.4.5 -R oven-sh/bun \
        -p bun-darwin-aarch64.zip -p SHASUMS256.txt &&
      awk '$2 == "bun-darwin-aarch64.zip" { print }' SHASUMS256.txt | shasum -a 256 -c &&
      unzip -q bun-darwin-aarch64.zip &&
      install -d "$toolchain/bin" &&
      install -m 755 bun-darwin-aarch64/bun "$toolchain/bin/bun" &&
-     test "$("$toolchain/bin/bun" --version)" = 1.4.4 &&
+     test "$("$toolchain/bin/bun" --version)" = 1.4.5 &&
      install -d -m 700 "$persistent" &&
      cp "$toolchain/bin/bun" "$persistent/bun" &&
      chmod 0755 "$persistent/bun" &&
-     test "$("$persistent/bun" --version)" = 1.4.4
+     test "$("$persistent/bun" --version)" = 1.4.5
    ) && rm -rf "$download" && export PATH="$toolchain/bin:$PATH"
    ```
 
-2. Advance the drained checkout through the Studio installation procedure below, install its
-   frozen dependencies under 1.4.4, and **regenerate the installed driver plist from
-   `scripts/com.omp.gateway-release-driver.plist`**. Merely updating the checkout leaves the old
+2. Follow [Studio installation](#studio-installation-run-as-gwops-after-integration) to advance
+   the drained checkout, install frozen dependencies under 1.4.5, and **regenerate the installed
+   driver plist from `scripts/com.omp.gateway-release-driver.plist`**. Merely updating the checkout leaves the old
    installed executable and PATH in place. Preserve the actual retained-Mac target and reviewed
    dry-run setting, inspect the read-only plan, then reload the regenerated plist only after the
    remaining prerequisites agree.
@@ -1109,13 +1109,14 @@ checkout's `packageManager`, not from the release tag alone.
    runtime from `UPSTREAM.lock.json.bunVersion`, and the Windows guest runtime and downloaded-zip
    checksum from `scripts/windows-qualification-pins.json` (`bunVersion`/`bunSha256`). Require their
    observed versions to agree with the current pin; an older lane installation is not inherited
-   qualification. The next signed candidate must requalify every lane under 1.4.4.
+   qualification. The next signed candidate must requalify every lane under 1.4.5.
 4. The published-byte smoke verifies the prepared persistent Bun at
-   `~/.local/lib/omp-session-gateway/bun/v1.4.4/bun` before installing the gateway, copying its
+   `~/.local/lib/omp-session-gateway/bun/v1.4.5/bun` before installing the gateway, copying its
    running Bun there if absent. That persistent copy is distinct from the driver's lane toolchain;
    keep the service's exact installed Bun path available. Installation re-points the service
    definition to that Bun, and gateway rollback keeps it
-   ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.9.0 retains its 1.4.0 qualification.
+   ([upgrade and rollback](UPGRADE_ROLLBACK.md)). Published v0.12.0 retains its Bun 1.4.4
+   qualification. Published v0.9.0 retains its 1.4.0 qualification.
 5. Prepare the qualification Pixel once: exempt Tailscale (`com.tailscale.ipn`) from Doze via
    **Settings → Apps → Tailscale → Battery → Unrestricted**, or explicitly run
    `adb shell dumpsys deviceidle whitelist +com.tailscale.ipn`. Tailscale recommends unrestricted

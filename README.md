@@ -72,7 +72,7 @@ Works with stock [OMP 18.1.20+](https://github.com/can1357/oh-my-pi/releases/tag
 You need:
 
 - the [latest stable release](https://github.com/carrythroughsystems/omp-session-gateway/releases/latest)
-- **Bun 1.4.4** at a path that stays put; the background service runs `bun` from it
+- **Bun 1.4.5 or newer** for v0.13.0, at a path that stays put; the background service runs `bun` from it
 - stock **OMP 18.1.20 or later**
 - Tailscale on the host and on your phone: a TUN-mode client on the host, and Serve over tailnet HTTPS, **never Funnel**
 
