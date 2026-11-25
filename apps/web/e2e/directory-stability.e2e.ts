@@ -67,7 +67,7 @@ test("ten heartbeat upserts remove no directory nodes, including after a list tr
   } finally { await fixture.stop(); }
 });
 
-test("a press that spans a heartbeat launches exactly once", async ({ page }) => {
+test("a press that spans an unchanged heartbeat launches exactly once", async ({ page }) => {
   const fixture = await startDashboardFixture([working]);
   try {
     await openDirectory(page, fixture.origin);
