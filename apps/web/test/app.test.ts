@@ -95,6 +95,7 @@ class FakeElement extends EventTarget {
   tabIndex = 0;
   id = "";
   open = false;
+  title = "";
   type = "";
   value = "";
   parent: FakeElement | undefined;
@@ -112,6 +113,14 @@ class FakeElement extends EventTarget {
   set textContent(value: string | null) {
     this.children.splice(0, this.children.length);
     if (value !== null && value !== "") this.append(value);
+  }
+
+  /** Equality of serialized directory elements, without listeners or circular parent pointers. */
+  get outerHTML(): string {
+    return JSON.stringify(this, (_key, value: unknown) => value instanceof FakeElement
+      ? [value.tagName, value.ownText, value.className, value.title, value.type, value.disabled,
+        [...value.attributes], value.dataset, [...value.style.properties], value.children]
+      : value);
   }
 
   get childElementCount(): number {
@@ -149,6 +158,7 @@ class FakeElement extends EventTarget {
 
   cloneNode(deep = false): FakeElement {
     const clone = new FakeElement(this.tagName, this.ownText);
+    clone.className = this.className;
     for (const [key, value] of this.attributes) clone.setAttribute(key, value);
     if (deep) clone.append(...this.children.map(child => child.cloneNode(true)));
     return clone;
@@ -2904,21 +2914,22 @@ describe("fleet directory bindings", () => {
       permission: "denied", initialSessions: [session("audit-visible-home")],
       clientConfig: { ...config, targets: ["one", "two", "three"].map(id =>
         ({ id, label: id, origin: `https://${id}.example` })) },
-      remoteResponse: async () => stall ? await responses.promise : Response.json({ revision: 1, sessions: [] }),
+      remoteResponse: async () => stall ? await responses.promise : Response.json({ revision: 1, sessions: [session("audit-visible-remote")] }),
       suffix: "audit-visible-coalesce",
     });
     try {
       for (let turn = 0; turn < 100; turn++) await Promise.resolve();
-      harness.setVisibility("hidden");
-      await Promise.resolve();
-      stall = true;
       let rebuilds = 0;
       const list = harness.elements.sessionList;
       const replace = list.replaceChildren.bind(list);
       list.replaceChildren = (...children): void => { rebuilds++; replace(...children); };
+      harness.setVisibility("hidden");
+      await Promise.resolve();
+      expect(rebuilds).toBe(1); // All three hosts' rows became non-actionable together.
+      stall = true;
       harness.setVisibility("visible");
       await Promise.resolve();
-      expect(rebuilds).toBe(1);
+      expect(rebuilds).toBe(1); // No new observation: no second commit.
     } finally {
       harness.setVisibility("hidden");
       responses.resolve(Response.json({ revision: 1, sessions: [] }));
@@ -2936,13 +2947,66 @@ describe("fleet directory bindings", () => {
         const instanceId = control.closest("[data-instance-id]")?.dataset.instanceId ??
           control.parent!.querySelector("[data-instance-id]")!.dataset.instanceId;
         control.focus();
-        harness.emit("session_upsert", { type: "session_upsert", revision: 2 + index, session: { ...other, busy: true } });
+        harness.emit("session_upsert", { type: "session_upsert", revision: 2 + index, session: { ...other, title: `Changed ${index}` } });
         const rebuilt = harness.elements.sessionList.querySelectorAll(selector).find(candidate =>
           (candidate.closest("[data-instance-id]")?.dataset.instanceId ??
             candidate.parent!.querySelector("[data-instance-id]")!.dataset.instanceId) === instanceId)!;
         expect(rebuilt === control).toBeFalse();
         expect((document as unknown as FakeDocument).activeElement === rebuilt).toBeTrue();
       }
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("a focused request survives a heartbeat and launches the current generation and ask", async () => {
+    const first = session("stable-focused-request", { inputRequired: true });
+    const harness = await bootApp({ permission: "denied", initialSessions: [first], suffix: "stable-request-action" });
+    try {
+      const list = harness.elements.sessionList;
+      const control = list.querySelector(".action-request")!;
+      control.focus();
+      const heartbeat = { ...first, lastSeenAt: "2026-07-21T10:01:00.000Z" };
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: heartbeat });
+      expect(list.querySelector(".action-request") === control).toBeTrue();
+      expect((document as unknown as FakeDocument).activeElement === control).toBeTrue();
+      const current = { ...heartbeat, generation: 2, ask: { ...first.ask!, requestId: "stable-replacement-ask" } };
+      harness.emit("session_upsert", { type: "session_upsert", revision: 3, session: current });
+      expect(list.querySelector(".action-request") === control).toBeTrue();
+      control.dispatchEvent(new Event("click"));
+      await settleUntil(() => harness.launchRequests.length === 1, 100);
+      expect(JSON.parse(String(harness.launchRequests[0]!.init.body))).toEqual({
+        mode: "control", generation: 2, requestId: current.ask.requestId,
+      });
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("a kept Options button binds the tray to the current ask, not the one originally drawn", async () => {
+    const first = session("stable-options-request", { inputRequired: true });
+    const harness = await bootApp({ permission: "denied", initialSessions: [first], suffix: "stable-options-hold" });
+    try {
+      const options = harness.elements.sessionList.querySelector(".hero-options")!;
+      const ask = { ...first.ask!, requestId: "stable-options-replacement" };
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: { ...first, ask } });
+      expect(harness.elements.sessionList.querySelector(".hero-options") === options).toBeTrue();
+      options.dispatchEvent(new Event("click"));
+      harness.elements.trayHost.querySelector(".hero-hold")!.dispatchEvent(new Event("click"));
+      expect(JSON.parse(harness.localStorage.getItem("omp.sessions.held-asks.v2") ?? "null")).toEqual([
+        expect.objectContaining({ instanceId: first.instanceId, requestId: ask.requestId }),
+      ]);
+    } finally { harness.setVisibility("hidden"); }
+  });
+
+  test("a late queue click cannot open a preview after its ask or session disappears", async () => {
+    const waiting = session("stable-obsolete-request", { inputRequired: true });
+    const harness = await bootApp({ permission: "denied", initialSessions: [waiting], suffix: "stable-obsolete-click" });
+    try {
+      const control = harness.elements.sessionList.querySelector(".action-request")!;
+      harness.emit("session_upsert", { type: "session_upsert", revision: 2, session: session(waiting.instanceId) });
+      control.dispatchEvent(new Event("click"));
+      expect(harness.elements.trayHost.open).toBeFalse();
+      harness.emit("session_remove", { type: "session_remove", revision: 3, instanceId: waiting.instanceId, generation: 1 });
+      control.dispatchEvent(new Event("click"));
+      expect(harness.elements.trayHost.open).toBeFalse();
+      expect(harness.launchRequests).toHaveLength(0);
     } finally { harness.setVisibility("hidden"); }
   });
 
@@ -2965,7 +3029,9 @@ describe("fleet directory bindings", () => {
     let revision = 0;
     const harness = await bootApp({
       permission: "denied", initialSessions: [session("audit-pending-local")], clientConfig: config,
-      remoteResponse: async () => Response.json({ revision: ++revision, sessions: [] }),
+      remoteResponse: async () => Response.json({
+        revision: ++revision, sessions: revision === 1 ? [] : [session("audit-arriving-remote", { inputRequired: true })],
+      }),
       launchResponse: async () => await gate.promise, suffix: "audit-pending-row",
     });
     try {

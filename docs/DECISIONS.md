@@ -1983,7 +1983,7 @@ together. Operational setup and exact scope are in [BrowserStack](BROWSERSTACK.m
 - A row keeps its tile, title, and facts while its session opens; only text-only actions swap their label to `Opening…`.
 - Shell-to-shell launches (Control upgrade, Next), bfcache resumes, disposal, and authorization withdrawal restore or replace the shell without motion.
 
-**Consequences:** The directory and the session read as one continuous space; a request that arrives moves its row into the queue instead of teleporting. Routine refreshes stay as cheap as before (one signature string per render). The visual lane keeps reduced motion and its zero-running-animations guard; the browser lane runs with motion live and `apps/web/e2e/motion.e2e.ts` proves which changes animate and which do not. Later layers (the tray system, first-run guidance, the all-clear moment) build on the same gate and tokens.
+**Consequences:** The directory and the session read as one continuous space; a request that arrives moves its row into the queue instead of teleporting. A refresh builds the next list off-document and keeps the live rows when their markup already matches, preserving focus and presses without masking changes made by launch actions. The visual lane keeps reduced motion and its zero-running-animations guard; the browser lane runs with motion live and `apps/web/e2e/motion.e2e.ts` proves which changes animate and which do not. Later layers (the tray system, first-run guidance, the all-clear moment) build on the same gate and tokens.
 
 ---
 
