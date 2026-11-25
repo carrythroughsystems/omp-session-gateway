@@ -4,6 +4,7 @@ import { notificationTopicDigest } from "./android-notification.ts";
 import type { AndroidPushPhase, AndroidPushProgress, AndroidPushRuntime, PushFixtureRole } from "./android-push-qualification.ts";
 import type { PushFixtureCommand } from "./fixtures/push-qualification-extension.ts";
 import type { FleetFixtureOperation } from "./fleet-push-fixture.ts";
+import { QualificationFailure } from "./qualification-failure.ts";
 
 export const FLEET_PUSH_PHASES = ["fleet_enrolled", "fleet_private_verified", "fleet_session_verified", "fleet_preview_verified",
   "fleet_race_verified", "fleet_taps_verified", "fleet_stale_taps_verified", "fleet_outage_verified", "fleet_restart_verified",
@@ -51,9 +52,15 @@ export interface FleetPushRuntime {
   /**
    * Arms a worker-side wait for this badge before the push that thaws Chrome. `settle()` returns
    * whether the worker saw it, or the last observation once the worker's running budget ends.
+   * It rejects typed when the worker has no observer: it restarted after `armBadgeObserver()`.
    */
   expectBadge(count: number, complete: boolean): { settle(): Promise<{ matched: boolean; observation?: FleetBadgeObservation }> };
   armBadgeObserver(): Promise<void>;
+  /**
+   * Diagnosis only, after a restart clear has failed: logs closed Play Services transport scalars.
+   * Its `dumpsys activity service` read thaws every frozen app, so no observing phase may call it.
+   */
+  restartClearTransport(): Promise<void>;
   /** Exact old-request tombstone plus one newly posted, identity-bound local replacement. */
   restartReplacement(previous: SessionMetadata, current: SessionMetadata): Promise<boolean>;
   revoke(): Promise<void>;
@@ -273,7 +280,12 @@ export async function runFleetPushPhases(c: FleetPhaseContext, step?: FleetPushD
     await r.fixture("answer", p.epoch, "remote"); await snapshot(s => !s.inputRequired, "remote");
     const exactClear = armBadge("restart-exact-clear", 1, true);
     await f.host("coordinator-up", p.epoch);
-    await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined);
+    try { await wait("restart remote exact clear", async () => await r.notificationCleared(old) ? true : undefined); }
+    catch (error) {
+      // Only an expired clear reads Play Services, and only now that its verdict is fixed.
+      if (error instanceof QualificationFailure && error.evidence.reason === "delivery_timeout") await f.restartClearTransport();
+      throw error;
+    }
     const restarted = await snapshot(s => s.inputRequired && s.instanceId === local.instanceId &&
       s.generation === local.generation && s.ask?.requestId !== local.ask?.requestId);
     await wait("restart local exact clear and replacement", async () => await f.restartReplacement(local, restarted) ? true : undefined);

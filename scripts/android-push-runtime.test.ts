@@ -941,7 +941,7 @@ test.each(["pending", "accepted", "handled", "worker-pending", "ledger-unreadabl
       ask: { requestId: "req_synthetic_restart", since: "2026-01-01T00:00:00.000Z" } };
     const source = fleetPushSource(identity.origin), tag = `omp-attention-${source.binding}-${remote.instanceId}`;
     const record = { key: "synthetic", tag, postedAt: 1, seen: true, visibleSince: 1, title: "OMP session needs attention", body: "", text: "" };
-    let time = 0, ledgerReads = 0, osReads = 0, workerReads = 0;
+    let time = 0, ledgerReads = 0, osReads = 0, workerReads = 0, transportReads = 0;
     const messages: string[] = [];
     const absent = scenario === "handled" || scenario === "worker-pending";
     const driver = {
@@ -964,6 +964,7 @@ test.each(["pending", "accepted", "handled", "worker-pending", "ledger-unreadabl
       spyOn(notificationOperations, "readAndroidNotificationRecords").mockImplementation(async () => ++osReads > 1 && absent ? [] : [record]),
       spyOn(deviceOperations, "withAndroidChrome").mockImplementation((async (run: (driver: unknown) => Promise<unknown>) => run(driver)) as typeof withAndroidChrome),
       spyOn(deviceOperations, "runAdb").mockImplementation(async (_serial, args, options) => {
+        transportReads++;
         expect(args).toEqual(["shell", "dumpsys activity service GcmService; date +GCM_CLOCK:%H:%M:%S"]);
         expect(options?.timeoutMs).toBe(3_000);
         if (scenario === "gcm-unreadable") throw new Error("synthetic GCM unavailable");
@@ -996,8 +997,7 @@ test.each(["pending", "accepted", "handled", "worker-pending", "ledger-unreadabl
         workerObserved: absent, workerCleared: scenario === "handled",
         ledgerReadFailed: scenario === "ledger-unreadable", ledgerBaselinePresent: true,
         ledgerRequestOutstanding: scenario === "pending",
-        ledgerClearAccepted: !["pending", "ledger-unreadable", "recipient-removed"].includes(scenario),
-        gcmReadFailed: scenario === "gcm-unreadable", gcmReceiveAgeMs: scenario === "gcm-unreadable" ? -1 : 1_500 });
+        ledgerClearAccepted: !["pending", "ledger-unreadable", "recipient-removed"].includes(scenario) });
       expect(workerReads).toBe(absent ? 1 : 0);
       expect(Object.entries(message).every(([key, value]) => key === "phase" || typeof value === "boolean" || typeof value === "number")).toBe(true);
       expect(messages.join("\n")).not.toMatch(/SYNTHETIC_PRIVATE|synthetic-remote|req_synthetic_restart/u);
@@ -1006,6 +1006,17 @@ test.each(["pending", "accepted", "handled", "worker-pending", "ledger-unreadabl
       await runtime.fleet.host("coordinator-up", "synthetic");
       await runtime.notificationCleared(remote);
       expect(JSON.parse(messages.at(-1)!.slice("android-fleet-clear: ".length)).sinceCoordinatorUpMs).toBe(6_000);
+      // Polling never reads Play Services: that dump lifts the freezer for every cached app.
+      expect(transportReads).toBe(0);
+      expect(messages.some(message => message.includes("gcm"))).toBe(false);
+      // Only the failure path reads it, once, as closed scalars.
+      await runtime.fleet.restartClearTransport();
+      expect(transportReads).toBe(1);
+      const unreadable = scenario === "gcm-unreadable";
+      expect(JSON.parse(messages.at(-1)!.slice("android-fleet-transport: ".length))).toEqual({ phase: "fleet_restart_verified",
+        sinceCoordinatorUpMs: 6_000, gcmReadFailed: unreadable, gcmConnected: !unreadable, gcmWifi: !unreadable,
+        gcmReceiveAgeMs: unreadable ? -1 : 1_500 });
+      expect(messages.join("\n")).not.toMatch(/SYNTHETIC_PRIVATE|synthetic-remote|req_synthetic_restart/u);
     } finally { for (const spy of spies) spy.mockRestore(); }
   });
 
@@ -2223,11 +2234,21 @@ test("an armed badge read waits in the worker across a freeze and answers inside
     ticks[1]!();
     expect(await settled.settle()).toEqual({ matched: false,
       observation: { count: 2, complete: true, call: { method: "setAppBadge", arguments: 1, argument: 2 } } });
-    // An unpatched observer ends a pending wait on its next tick.
+    // A worker that loses the observer ends a pending wait on its next tick, typed: the badge
+    // calls of a restarted worker ran unobserved and no later read can recover them.
     const unpatched = runtime.fleet.expectBadge(0, true);
     delete self.__ompQualificationBadge;
     ticks[2]!();
-    expect(await unpatched.settle()).toMatchObject({ matched: false });
+    const restarted = await unpatched.settle().catch(error => error);
+    expect(restarted.evidence).toMatchObject({ lane: "androidPush", class: "harness", reason: "invalid_evidence",
+      operation: "read_only", observations: {} });
+    expect(restarted.evidence.observations).toEqual({});
+    expect(restarted.cause.message).toBe("Fleet badge observer lost: the worker restarted after it was armed");
+    // Armed against a worker that already restarted: the same verdict at once, without a tick.
+    const fresh = await runtime.fleet.expectBadge(2, true).settle().catch(error => error);
+    expect(fresh.evidence).toMatchObject({ class: "harness", reason: "invalid_evidence", observations: {} });
+    expect(fresh.cause.message).toBe(restarted.cause.message);
+    expect(ticks).toHaveLength(3);
     // A lost transport is the lane's typed read-only transport failure, not an assertion.
     broken = true;
     const lost = await runtime.fleet.expectBadge(1, true).settle().catch(error => error);

@@ -814,12 +814,17 @@ evidence and must be re-observed; it cannot become a permanent negative cache. C
 `android-fleet-clear:` diagnostics record phase, remote/local role, OS count and worker/cache
 booleans only, never notification or request identities.
 The restart clear wait additionally samples elapsed milliseconds since coordinator-up, exact remote
-outstanding membership, baseline membership, stable recipient/grant counts and the advanced epoch,
-plus Chrome GCM receive age and connection/Wi-Fi booleans. The ledger is projected on the host;
-no private ledger or GCM dump is exported. Removal after accepted baseline membership, with an
-advanced epoch and unchanged counts, is clear-acceptance evidence in this isolated, non-mutating
-window. GCM receipts are Chrome-wide, not request-specific: a fresh receipt alone cannot distinguish
-this clear from the local replacement. An OS-present sample deliberately does not wake/read the
+outstanding membership, baseline membership, stable recipient/grant counts and the advanced epoch.
+The ledger is projected on the host; no private ledger is exported. Removal after accepted baseline
+membership, with an advanced epoch and unchanged counts, is clear-acceptance evidence in this
+isolated, non-mutating window. Chrome GCM receive age and connection/Wi-Fi booleans are read once,
+as a closed `android-fleet-transport:` line, and only after that wait has already failed: `dumpsys
+activity service GcmService` lifts Android's freezer for every cached app while it runs, so no
+observing phase reads it and no GCM dump is exported. In `v0.13.0-prealpha.2` that read, then made
+on every poll, thawed 113 apps; a memory-pressure event followed, Chrome released the instrumented
+worker 16 seconds later, and the next push ran in a fresh worker with no observer. GCM receipts are
+Chrome-wide, not request-specific: a fresh receipt alone cannot distinguish this clear from the
+local replacement. An OS-present sample deliberately does not wake/read the
 worker and reports `workerObserved=false`, not proof that the worker received no clear. Failed
 diagnostic reads stay explicitly unavailable and never change the original verdict or 60-second
 wait. The product does not persist its volatile restart gate or source-feed knowledge, so these
@@ -891,7 +896,9 @@ that follows an ask, clear or coordinator restart while the page is closed is ar
 action. Its worker-side wait is already in flight when the push thaws Chrome and answers inside
 that thaw; it counts only ticks the worker runs, so a frozen process cannot spend its budget. An
 unmatched answer falls back to the ordinary read and its diagnostics (`v0.10.1-prealpha.2` lost
-`fleet_restart_verified` when that later read found all six Chrome processes frozen).
+`fleet_restart_verified` when that later read found all six Chrome processes frozen). A worker
+without the observer was restarted after it was armed: its badge calls ran unobserved and no later
+read can recover them, so the wait fails typed at once instead of reading until Chrome refreezes.
 The restart phase carries its verified badge across the closed-page quiet window only when a
 complete, healthy coordinator telemetry window records zero sends, acknowledgements and failures
 globally; any push activity or unavailable telemetry requires a fresh worker evaluation.
