@@ -506,7 +506,7 @@ async function bootApp(options: {
   readonly permission: NotificationPermission;
   readonly initialSessions: readonly SessionMetadata[];
   readonly initialListStatus?: number;
-  readonly listResponse?: () => Promise<Response>;
+  readonly listResponse?: (init: RequestInit) => Promise<Response>;
   readonly workerResponse?: unknown;
   readonly workerReply?: (message: unknown) => unknown;
   readonly workerV3?: boolean;
@@ -523,7 +523,7 @@ async function bootApp(options: {
   readonly firstRun?: boolean;
   readonly clientConfig?: unknown;
   readonly clientConfigStatus?: number;
-  readonly clientConfigResponse?: () => Response;
+  readonly clientConfigResponse?: () => Response | Promise<Response>;
   readonly remoteSessions?: readonly SessionMetadata[];
   readonly remotePayload?: unknown;
   readonly remoteResponse?: (init: RequestInit) => Promise<Response>;
@@ -779,7 +779,7 @@ async function bootApp(options: {
       });
     }
     if (path !== "/api/v1/sessions") throw new Error(`unexpected fetch: ${path}`);
-    if (options.listResponse !== undefined) return await options.listResponse();
+    if (options.listResponse !== undefined) return await options.listResponse(init);
     if (failedListRequests > 0) {
       failedListRequests -= 1;
       throw new TypeError("network request failed");
@@ -6190,6 +6190,174 @@ describe("fleet background notifications", () => {
     expect(harness.elements.statusBanner.dataset.kind).toBe("ready");
     expect(harness.launchRequests).toHaveLength(0);
     harness.setVisibility("hidden");
+  });
+
+  describe("cold directory boot", () => {
+    function holdClientConfig() {
+      const requested = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      return {
+        requested: requested.promise, release: released.resolve,
+        async respond(): Promise<Response> {
+          requested.resolve();
+          await released.promise;
+          return Response.json({ ...fleetPageConfig, targets: [] });
+        },
+      };
+    }
+
+    test("fetches sessions before client-config settles but waits for saved dismissals to display them", async () => {
+      const config = holdClientConfig();
+      const visible = session("boot-visible");
+      const hidden = session("boot-dismissed");
+      const storage = new FakeStorage();
+      storage.setItem("omp.sessions.dismissed.v2", JSON.stringify([{
+        sourceId: "local", sourceOrigin: fleetPageConfig.local.origin,
+        instanceId: hidden.instanceId, generation: hidden.generation, dismissedAt: hidden.lastSeenAt,
+      }]));
+      let requests = 0;
+      const boot = bootApp({
+        permission: "denied", initialSessions: [], storage, suffix: "boot-prefetch-triage",
+        clientConfigResponse: config.respond,
+        listResponse: async () => {
+          requests += 1;
+          return Response.json({ revision: 1, sessions: [visible, hidden] });
+        },
+      });
+      try {
+        await config.requested;
+        expect(requests).toBe(1);
+        await Bun.sleep(0);
+        expect(document.querySelector(".working-row")).toBeNull();
+        config.release();
+        const harness = await boot;
+        const rows = harness.elements.sessionList.querySelectorAll(".working-row");
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.textContent).toContain(visible.title);
+        expect(requests).toBe(1);
+      } finally {
+        config.release();
+        (await boot).setVisibility("hidden");
+      }
+    });
+
+    for (const interruption of ["online", "offline", "freeze"] as const) {
+      test(`${interruption} before client-config cancels the first session response`, async () => {
+        const config = holdClientConfig();
+        const old = session("boot-discarded");
+        const fresh = session("boot-replacement");
+        const signals: AbortSignal[] = [];
+        let bodyCancelled = false;
+        let finishBody!: () => void;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ revision: 10, sessions: [old] })));
+            finishBody = () => controller.close();
+          },
+          cancel() { bodyCancelled = true; },
+        });
+        const boot = bootApp({
+          permission: "denied", initialSessions: [], suffix: `boot-prefetch-${interruption}`,
+          clientConfigResponse: config.respond,
+          listResponse: async ({ signal }) => {
+            signals.push(signal!);
+            return signals.length === 1 ? new Response(body) : Response.json({ revision: 1, sessions: [fresh] });
+          },
+        });
+        try {
+          await config.requested;
+          expect(signals).toHaveLength(1);
+          await Bun.sleep(0); // Let the first response deliver headers, with its body still open.
+          const lifecycle = document as unknown as FakeDocument;
+          if (interruption === "freeze") {
+            lifecycle.setVisibility("hidden");
+            lifecycle.freeze();
+          } else window.dispatchEvent(new Event(interruption));
+          expect(signals[0]!.aborted).toBeTrue();
+          await settleUntil(() => bodyCancelled);
+          if (interruption !== "online") {
+            expect(signals).toHaveLength(1);
+            if (interruption === "freeze") lifecycle.setVisibility("visible");
+            else window.dispatchEvent(new Event("online"));
+          }
+          expect(signals).toHaveLength(2);
+          await Bun.sleep(0);
+          expect(document.querySelector(".working-row")).toBeNull();
+          config.release();
+          const harness = await boot;
+          const rows = harness.elements.sessionList.querySelectorAll(".working-row");
+          expect(rows).toHaveLength(1);
+          expect(rows[0]?.textContent).toContain(fresh.title);
+          expect(signals).toHaveLength(2);
+        } finally {
+          if (!bodyCancelled) finishBody();
+          config.release();
+          (await boot).setVisibility("hidden");
+        }
+      });
+    }
+
+    test("applies an early session 403 only after client-config settles", async () => {
+      const config = holdClientConfig();
+      let requests = 0;
+      const boot = bootApp({
+        permission: "denied", initialSessions: [], initialListStatus: 403, suffix: "boot-prefetch-forbidden",
+        clientConfigResponse: config.respond,
+        listResponse: async () => {
+          requests += 1;
+          return new Response(null, { status: 403 });
+        },
+      });
+      try {
+        await config.requested;
+        expect(requests).toBe(1);
+        await Bun.sleep(0);
+        expect(document.querySelector<HTMLElement>("#status-banner")?.dataset.kind).not.toBe("unauthorized");
+        config.release();
+        const harness = await boot;
+        expect(harness.elements.statusBanner.dataset.kind).toBe("unauthorized");
+        expect(harness.elements.statusBanner.textContent).toBe("This tailnet identity is not authorized.");
+        expect(requests).toBe(1);
+      } finally {
+        config.release();
+        (await boot).setVisibility("hidden");
+      }
+    });
+
+    for (const failure of ["network", "timeout"] as const) {
+      test(`an early session ${failure} uses the normal first-snapshot failure banner`, async () => {
+        const config = holdClientConfig();
+        let requests = 0;
+        const boot = bootApp({
+          permission: "denied", initialSessions: [], initialListStatus: 503, suffix: `boot-prefetch-${failure}`,
+          clientConfigResponse: config.respond,
+          listResponse: async ({ signal }) => {
+            requests += 1;
+            if (failure === "network") throw new TypeError("network request failed");
+            return await new Promise<Response>((_resolve, reject) => {
+              signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+            });
+          },
+        });
+        try {
+          await config.requested;
+          await Bun.sleep(0);
+          const beforeConfig = requests;
+          config.release();
+          if (failure === "timeout") {
+            await settleUntil(() => document.querySelector<HTMLElement>("#status-banner")?.dataset.kind === "loading", 100);
+            (window as unknown as FakeWindow).runTimersWithDelay(4_000);
+          }
+          const harness = await boot;
+          expect(harness.elements.statusBanner.dataset.kind).toBe(failure === "timeout" ? "desktop" : "tailnet");
+          expect(beforeConfig).toBe(1);
+          expect(requests).toBe(1);
+        } finally {
+          config.release();
+          (await boot).setVisibility("hidden");
+        }
+      });
+    }
   });
 
   test("a warm page rechecks client-config before accepting the old origin's binding", async () => {
