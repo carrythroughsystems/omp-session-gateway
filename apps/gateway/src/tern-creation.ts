@@ -279,14 +279,22 @@ export class SessionCreationService {
     const preflightSignal = AbortSignal.any([signal, preflightAbort.signal]);
     let baseline;
     let inspection;
-    let runtime;
     try {
-      runtime = await (this.#dependencies.runtimeAvailable?.() ?? validateTernRuntime(this.#dependencies.config.tern!));
-      baseline = await this.#dependencies.poller.refreshForAdoption({ signal: preflightSignal, timeoutMs: Math.min(5000, preflightDeadline - this.#clock.monotonic()) });
-      inspection = runtime ? await this.#cli.inspect(profile, preflightSignal) : undefined;
+      const runtime = await (this.#dependencies.runtimeAvailable?.() ?? validateTernRuntime(this.#dependencies.config.tern!));
+      if (runtime && !preflightSignal.aborted) {
+        // Keep the CLI slot reserved until both checks settle, even if one rejects.
+        const [discovery, inspected] = await Promise.allSettled([
+          this.#dependencies.poller.refreshForAdoption({ signal: preflightSignal, timeoutMs: Math.min(5000, preflightDeadline - this.#clock.monotonic()) }),
+          this.#cli.inspect(profile, preflightSignal),
+        ]);
+        if (discovery.status === "fulfilled" && inspected.status === "fulfilled") {
+          baseline = discovery.value;
+          inspection = inspected.value;
+        }
+      }
     } finally { clearTimeout(preflightTimer); }
     if (signal.aborted) return;
-    if (!runtime || baseline.status !== "ok" || !baseline.observation.directoryHealthy || !inspection || preflightSignal.aborted || this.#clock.monotonic() >= preflightDeadline) {
+    if (!baseline || baseline.status !== "ok" || !baseline.observation.directoryHealthy || !inspection || preflightSignal.aborted || this.#clock.monotonic() >= preflightDeadline) {
       await this.#transition(operationId, { state: "failed", error: "preflight_failed" }); return;
     }
     const instances = new Set(baseline.observation.knownInstanceIds);
@@ -311,8 +319,17 @@ export class SessionCreationService {
       spawnedAt = actualSpawnedAt;
       await this.#transition(operationId, { state: "awaiting_omp" }, result.blockId);
       let viewOnly = false;
-      const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
-      if (refresh.status === "ok" && refresh.observation.startedAt > actualSpawnedAt.monotonicMs && refresh.observation.round > baseline.observation.round) latest = refresh.observation;
+      const refreshDiscovery = async (): Promise<boolean> => {
+        const refresh = await this.#dependencies.poller.refreshForAdoption({ signal, timeoutMs: Math.min(5000, deadline - this.#clock.monotonic()) });
+        if (refresh.status === "ok" && refresh.observation.startedAt > actualSpawnedAt.monotonicMs &&
+            refresh.observation.round > baseline.observation.round) latest = refresh.observation;
+        return refresh.status !== "stopped";
+      };
+      // After the immediate round, budget eight follow-ups before relying on scheduled polling.
+      let remainingRefreshes = await refreshDiscovery() ? 8 : 0;
+      const heartbeatMs = this.#dependencies.config.registry.heartbeatSeconds * 1_000;
+      let refreshDelayMs = 1_000;
+      let nextRefreshAt = this.#clock.monotonic() + refreshDelayMs;
       // Includes batches received while createTab was still resolving executable paths or its receipt.
       if (latest && latest.startedAt <= actualSpawnedAt.monotonicMs) latest = undefined;
       while (!signal.aborted && this.#clock.monotonic() < deadline) {
@@ -330,7 +347,14 @@ export class SessionCreationService {
             await this.#transition(operationId, { state: "ready", session: { instanceId: host.instanceId, generation: host.generation } }); return;
           }
         }
-        await this.#clock.sleep(Math.min(1000, Math.max(0, deadline - this.#clock.monotonic())), signal);
+        const now = this.#clock.monotonic();
+        if (file && remainingRefreshes > 0 && now >= nextRefreshAt && now < deadline && !signal.aborted) {
+          remainingRefreshes = await refreshDiscovery() ? remainingRefreshes - 1 : 0;
+          refreshDelayMs = Math.min(refreshDelayMs * 2, heartbeatMs);
+          nextRefreshAt = this.#clock.monotonic() + refreshDelayMs;
+          continue;
+        }
+        await this.#clock.sleep(Math.min(1000, Math.max(0, deadline - now)), signal);
       }
       if (!this.#abort.signal.aborted) await this.#transition(operationId, { state: "started_unavailable", error: viewOnly ? "control_unavailable" : "adoption_timeout" });
     } finally { unsubscribe(); latest = undefined; instances.clear(); sessions.clear(); blocks.clear(); }

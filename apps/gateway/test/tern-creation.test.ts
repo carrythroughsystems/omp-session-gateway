@@ -25,10 +25,12 @@ const request: SessionCreationRequest = { clientOperationId: clientId, revision,
 const host = { instanceId: "created-instance", generation: 1, sessionId: "session-one", pid: 42,
   startedAt: initialTime, createdAt: initialTime, canControl: true };
 const empty: TernInspection = { blocks: [], panes: [] };
-const target: TernInspection = { blocks: ["42"], panes: [{ paneId: "42", sessionBasename: "2026-10-24T00-00-00-000Z_session-one.jsonl" }] };
+const basename = "2026-10-24T00-00-00-000Z_session-one.jsonl";
+const target: TernInspection = { blocks: ["42"], panes: [{ paneId: "42", sessionBasename: basename }] };
 interface FixtureOptions {
   start?: TernCreateResult;
   preflight?: boolean;
+  preflightFailure?: "runtime" | "refresh" | "inspect";
   hosts?: AdoptionObservation["hosts"];
   baseline?: AdoptionObservation["hosts"];
   inspection?: TernInspection;
@@ -37,7 +39,10 @@ interface FixtureOptions {
   contents?: string;
   heldPreflight?: boolean;
   heldSpawn?: boolean;
-  heldAdoption?: boolean;
+  heldAdoption?: number;
+  stoppedAdoption?: number;
+  publishAfterMs?: number;
+  heartbeatSeconds?: number;
   earlyObservation?: boolean;
   lateMetadata?: boolean;
   oldObservation?: boolean;
@@ -48,10 +53,14 @@ interface FixtureOptions {
 }
 async function fixture(options: FixtureOptions = {}) {
   let now = initialTime, monotonic = 1, uuidCall = 0, polls = 0, inspections = 0, creates = 0;
+  let runtimeChecks = 0, metadataReported = false;
+  let spawnMonotonicMs: number | undefined;
   let contents = options.contents;
+  const adoptionRefreshes: number[] = [];
   const writes: string[] = [];
   const completed = Promise.withResolvers<void>();
   const entered = Promise.withResolvers<void>();
+  const preflightGate = Promise.withResolvers<void>();
   const spawnGate = Promise.withResolvers<void>();
   const commitGate = Promise.withResolvers<void>();
   const probeGate = Promise.withResolvers<void>();
@@ -60,12 +69,14 @@ async function fixture(options: FixtureOptions = {}) {
   const listeners = new Set<(batch: AdoptionObservation) => void>();
   const batch = (hosts: AdoptionObservation["hosts"]): AdoptionObservation => ({ round: polls, startedAt: monotonic,
     directoryHealthy: options.preflight !== false, knownInstanceIds: hosts.map(host => host.instanceId), hosts });
-  const held = async (signal: AbortSignal): Promise<void> => {
+  const held = async (signal: AbortSignal, release?: Promise<void>): Promise<void> => {
     const done = Promise.withResolvers<void>();
     if (signal.aborted) return;
-    signal.addEventListener("abort", () => done.resolve(), { once: true });
+    const abort = () => done.resolve();
+    signal.addEventListener("abort", abort, { once: true });
     entered.resolve();
-    return done.promise;
+    try { await (release ? Promise.race([done.promise, release]) : done.promise); }
+    finally { signal.removeEventListener("abort", abort); }
   };
   const ledger: CreationLedger = {
     read: async () => contents,
@@ -82,20 +93,30 @@ async function fixture(options: FixtureOptions = {}) {
       if (["ready", "failed", "started_unavailable", "outcome_unknown"].includes(state)) completed.resolve();
     },
   };
-  const service = await SessionCreationService.open({ config, ledger, uuid: () => uuidCall++ === 0 ? revision : operationId,
-    clock: { now: () => now, monotonic: () => monotonic,
-      sleep: async ms => { const elapsed = options.lateMetadata ? ms : Math.max(ms, 110001); monotonic += elapsed; now += elapsed; } },
-    runtimeAvailable: async () => true,
+  const fixtureConfig = options.heartbeatSeconds === undefined ? config :
+    { ...config, registry: { ...config.registry, heartbeatSeconds: options.heartbeatSeconds } };
+  const service = await SessionCreationService.open({ config: fixtureConfig, ledger, uuid: () => uuidCall++ === 0 ? revision : operationId,
+    clock: { now: () => now, monotonic: () => monotonic, sleep: async ms => { monotonic += ms; now += ms; } },
+    runtimeAvailable: async () => ++runtimeChecks === 1 || options.preflightFailure !== "runtime",
     registry: { authorizeLaunch: () => options.authorization === "missing" ? { status: "missing" } : { status: "ok", session: {} as never } },
     poller: {
       subscribeObservations(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
       async refreshForAdoption({ signal }): Promise<AdoptionRefresh> {
+        const elapsed = spawnMonotonicMs === undefined ? undefined : monotonic - spawnMonotonicMs;
+        if (elapsed !== undefined) adoptionRefreshes.push(elapsed);
         polls++; monotonic++;
-        if ((polls === 1 && options.heldPreflight) || (polls > 1 && options.heldAdoption)) {
+        if (polls === 1 && options.heldPreflight) await held(signal, preflightGate.promise);
+        if (signal.aborted) return { status: "aborted" };
+        if (polls === 1 && options.preflightFailure === "refresh") return { status: "timed_out" };
+        if (adoptionRefreshes.length === options.heldAdoption) {
           await held(signal); return { status: "aborted" };
         }
+        if (adoptionRefreshes.length === options.stoppedAdoption) return { status: "stopped" };
         if (polls > 1 && options.refreshUnavailable) return { status: "timed_out" };
-        const observation = batch(polls === 1 ? options.baseline ?? [] : options.hosts ?? [{ ...host, startedAt: now, createdAt: now }]);
+        const published = options.publishAfterMs === undefined ||
+          (metadataReported && elapsed !== undefined && elapsed >= options.publishAfterMs);
+        const observation = batch(polls === 1 ? options.baseline ?? [] :
+          options.hosts ?? (published ? [{ ...host, startedAt: now, createdAt: now }] : []));
         for (const listener of listeners) listener(observation);
         return { status: "ok", observation };
       },
@@ -110,13 +131,18 @@ async function fixture(options: FixtureOptions = {}) {
             await probeGate.promise;
           }
           inspections++;
-          if (creates === 0) return options.baselineInspection ?? empty; // availability probes and preflight
+          if (creates === 0) {
+            if (inspections > 1 && options.preflightFailure === "inspect") return undefined;
+            return options.baselineInspection ?? empty; // availability probes and preflight
+          }
           if (options.lateMetadata && inspections >= 3 && inspections <= 5) {
             return parseTernInspection(new TextEncoder().encode(
               '{"sessions":[{"tabs":[{"blocks":[{"id":42}]}]}],"panes":[{"pane":42,"omp_session_file":null}]}',
             ));
           }
-          return options.inspection ?? target;
+          const inspection = options.inspection ?? target;
+          metadataReported ||= inspection.panes.some(pane => pane.paneId === "42" && pane.sessionBasename === basename);
+          return inspection;
         } finally { inspecting = false; }
       },
       async createTab(_copy, _profile, signal) {
@@ -124,6 +150,7 @@ async function fixture(options: FixtureOptions = {}) {
         expect(JSON.parse(contents!).operations[0].status.state).toBe("launching");
         if (options.beforeSpawn) { entered.resolve(); await spawnGate.promise; }
         const spawnedAt = { monotonicMs: monotonic, wallTimeMs: now };
+        spawnMonotonicMs = spawnedAt.monotonicMs;
         if (options.earlyObservation) {
           polls++; monotonic++;
           for (const listener of listeners) listener({ ...batch(options.hosts ?? [{ ...host, startedAt: now, createdAt: now }]),
@@ -135,10 +162,11 @@ async function fixture(options: FixtureOptions = {}) {
     },
   });
   const finish = async () => { await completed.promise; await service.stop(); };
-  return { service, writes, finish, entered: entered.promise, get creates() { return creates; }, get contents() { return contents; },
-    completed: completed.promise, releaseSpawn: spawnGate.resolve, releaseCommit: commitGate.resolve, releaseProbe: probeGate.resolve,
+  return { service, writes, finish, adoptionRefreshes, entered: entered.promise, get creates() { return creates; }, get contents() { return contents; },
+    completed: completed.promise, releasePreflight: preflightGate.resolve, releaseSpawn: spawnGate.resolve,
+    releaseCommit: commitGate.resolve, releaseProbe: probeGate.resolve,
     probeEntered: probeEntered.promise,
-    get collisions() { return collisions; },
+    get collisions() { return collisions; }, get discoveryRounds() { return polls; }, get elapsedMs() { return monotonic - 1; },
     observe(hosts: AdoptionObservation["hosts"]) {
       polls++; monotonic++;
       for (const listener of listeners) listener(batch(hosts));
@@ -241,6 +269,58 @@ if (args[0] === "inspect") {
 });
 
 describe("durable session creation transitions", () => {
+  test("overlaps preflight inspect with discovery without spawning early", async () => {
+    const f = await fixture({ heldPreflight: true });
+    try {
+      await f.service.accept("owner", request, () => true);
+      await f.entered;
+      expect({ inspections: f.inspections, creates: f.creates }).toEqual({ inspections: 2, creates: 0 });
+      f.releasePreflight();
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toMatchObject({ state: "ready" });
+    } finally { await f.service.stop(); }
+  });
+  for (const failure of ["runtime", "refresh", "inspect"] as const) {
+    test(`preflight ${failure} failure cannot spawn`, async () => {
+      const f = await fixture({ preflightFailure: failure });
+      await f.service.accept("owner", request, () => true);
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toMatchObject({ state: "failed", error: "preflight_failed" });
+      expect(f.creates).toBe(0);
+      expect(f.discoveryRounds).toBe(failure === "runtime" ? 0 : 1);
+    });
+  }
+  test("adopts a late Control host without a heartbeat", async () => {
+    const f = await fixture({ publishAfterMs: 6_000 });
+    await f.service.accept("owner", request, () => true);
+    await f.finish();
+    expect({ status: f.service.status("owner", operationId), rounds: f.discoveryRounds }).toMatchObject({
+      status: { state: "ready", session: { instanceId: host.instanceId, generation: host.generation } },
+      rounds: 5,
+    });
+  });
+  test("backs off to the configured heartbeat and budgets eight follow-ups over the full deadline", async () => {
+    const f = await fixture({ hosts: [], heartbeatSeconds: 5 });
+    await f.service.accept("owner", request, () => true);
+    await f.finish();
+    expect(f.service.status("owner", operationId)).toMatchObject({ state: "started_unavailable", error: "adoption_timeout" });
+    expect(f.adoptionRefreshes.map(ms => Math.floor(ms / 1_000))).toEqual([0, 1, 3, 7, 12, 17, 22, 27, 32]);
+    expect(f.elapsedMs).toBe(110_000);
+  });
+  for (const [reason, options, count] of [
+    ["session-file metadata is absent", { inspection: { blocks: target.blocks, panes: [{ paneId: "42" }] } }, 1],
+    ["the immediate refresh is stopped", { stoppedAdoption: 1 }, 1],
+    ["a follow-up refresh is stopped", { stoppedAdoption: 2 }, 2],
+  ] as const) {
+    test(`limits forced discovery when ${reason}`, async () => {
+      const f = await fixture({ hosts: [], ...options });
+      await f.service.accept("owner", request, () => true);
+      await f.finish();
+      expect(f.service.status("owner", operationId)).toMatchObject({ state: "started_unavailable", error: "adoption_timeout" });
+      expect(f.adoptionRefreshes).toHaveLength(count);
+      expect(f.elapsedMs).toBe(110_000);
+    });
+  }
   test("rejects an observation from a pre-spawn CLI hold when the following fresh refresh times out", async () => {
     const f = await fixture({ beforeSpawn: true, refreshUnavailable: true });
     await f.service.accept("owner", request, () => true);
@@ -368,10 +448,18 @@ describe("durable session creation transitions", () => {
     expect(f.inspections).toBe(6);
     expect(f.writes.map(text => JSON.parse(text).operations[0].status.state)).toEqual(["accepted", "launching", "awaiting_omp", "ready"]);
   });
-  for (const [option, state] of [["heldSpawn", "outcome_unknown"], ["heldAdoption", "started_unavailable"]] as const) {
-    test(`shutdown durably classifies ${option} and removes its subscription`, async () => {
-      const f = await fixture({ [option]: true }); await f.service.accept("owner", request, () => true); await f.entered;
-      await f.service.stop(); expect(f.service.status("owner", operationId)).toMatchObject({ state, error: "interrupted" });
+  for (const [stage, options, state] of [
+    ["held spawn", { heldSpawn: true }, "outcome_unknown"],
+    ["immediate refresh", { heldAdoption: 1 }, "started_unavailable"],
+    ["follow-up refresh", { heldAdoption: 2, hosts: [] }, "started_unavailable"],
+  ] as const) {
+    test(`shutdown aborts ${stage}, durably classifies it and removes its subscription`, async () => {
+      const f = await fixture(options);
+      await f.service.accept("owner", request, () => true);
+      try {
+        expect(await Promise.race([f.entered.then(() => "held"), f.completed.then(() => "completed")])).toBe("held");
+      } finally { await f.service.stop(); }
+      expect(f.service.status("owner", operationId)).toMatchObject({ state, error: "interrupted" });
       expect(f.creates).toBe(1); expect(f.subscriptions).toBe(0);
     });
   }
