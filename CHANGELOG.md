@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.13.0] — 2026-11-25
 
-This release uses stock OMP v19.1.1 as its engineering baseline. The 13 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v19.1.1 as its engineering baseline. The 14 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -47,6 +47,8 @@ This release uses stock OMP v19.1.1 as its engineering baseline. The 13 changelo
   or a tab is deeply split; such unread metadata no longer invalidates the whole inspection.
 - Add a `credentials_only` mode to the droplet qualification workflow. It stops after the secret
   and Tailscale key preflights, so expired hosted credentials are found before a campaign starts.
+- Keep the Android Push coordinator-restart phase from thawing every frozen app: Play Services
+  state is read only after a restart clear has failed, and a restarted worker fails typed.
 
 ## [v0.12.0] — 2026-11-13
 

@@ -19,11 +19,11 @@ below remain unchanged.
 <!-- release-generate:current:start -->
 ## v0.13.0 preparation — not yet qualified or published
 
-**Prepared:** 2026-11-25. This release uses stock OMP v19.1.1 as its engineering baseline. The 13 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
+**Prepared:** 2026-11-25. This release uses stock OMP v19.1.1 as its engineering baseline. The 14 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
 
 - Planned qualification: Debian 13 x86-64; macOS 27.0 (26A428) arm64 in a Virtualization.framework guest (VirtualMac2,1, ADR-033); a disposable Windows Server 2025 host (the Administrator lifecycle and a fresh standard-user install); Chrome on the physical Pixel 10 Pro, including its background-Push lane; and real iPhone, iPad, and Galaxy devices in TestingBot's cloud. Every lane must pass against these exact signed bytes before stable promotion; the plan is not evidence.
 
-Published v0.12.0 remains the predecessor and current stable. The planned candidate tag is `v0.13.0-prealpha.2`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
+Published v0.12.0 remains the predecessor and current stable. The planned candidate tag is `v0.13.0-prealpha.3`; no qualification or publication is claimed. The stable lock stays unchanged until approval.
 <!-- release-generate:current:end -->
 
 ## Mainline v0.12.0 — published stable
