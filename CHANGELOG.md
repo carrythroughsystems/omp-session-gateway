@@ -8,7 +8,7 @@ The format is based on Keep a Changelog and Semantic Versioning.
 
 ## [v0.13.0] — 2026-11-25
 
-This release uses stock OMP v19.1.1 as its engineering baseline. The 12 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
+This release uses stock OMP v19.1.1 as its engineering baseline. The 13 changelog entries below record the changes since v0.12.0. Historical receipts do not qualify these bytes.
 
 ### Added
 
@@ -45,6 +45,8 @@ This release uses stock OMP v19.1.1 as its engineering baseline. The 12 changelo
   release no longer prints the update warning that failed every finalized upload.
 - Keep Tern session creation available when a pane in the window has a long title or argument,
   or a tab is deeply split; such unread metadata no longer invalidates the whole inspection.
+- Add a `credentials_only` mode to the droplet qualification workflow. It stops after the secret
+  and Tailscale key preflights, so expired hosted credentials are found before a campaign starts.
 
 ## [v0.12.0] — 2026-11-13
 
