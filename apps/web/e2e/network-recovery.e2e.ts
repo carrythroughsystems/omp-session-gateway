@@ -67,7 +67,9 @@ test("cold boot overlaps client config and sessions and replaces an interrupted 
           await page.evaluate(() => window.dispatchEvent(new Event("online")));
           // The held request can only end by the page's abort; WebKit words that as a cancellation.
           await expect.poll(() => failed.get(requests[0]!)).toMatch(/aborted|cancell?ed/iu);
-          await expect.poll(() => intercepted).toBe(2);
+          // The held request never reaches the fixture, so the one it logs is the replacement. The route
+          // cannot count it: WebKit skips page routes once the service worker controls the page.
+          await expect.poll(() => fixture.requests.filter(request => request === "GET /api/v1/sessions").length).toBe(1);
           await expect(row).toHaveCount(0);
           releaseConfig.resolve();
         }
