@@ -134,6 +134,11 @@ Activity-stop events share the ordered push dispatch queue with a record-local r
 
 #### Shell updates and caching
 
+At daemon startup, `static.ts` snapshots the shipped text and unhashed shell assets in memory and
+precomputes smaller Brotli and gzip variants for text. Hashed fonts stay file-backed. Compression
+does not add precompressed files to the release archive; a managed runtime activation restarts the
+daemon to load the new assets. See [Static assets](PROTOCOL.md#static-assets) for HTTP cache behavior.
+
 The service worker precaches the content-hashed application shell — including the pinned `collab-client` module, stylesheet, and upright Geist faces — while an idle directory preloads the client module so taps pay only for the capability `POST` and relay handshake.
 
 Where supported, static routing sends navigations and same-origin `/api/` requests directly to the network without waiting for the worker to start. The browser can still start the worker in the background. The page remains controlled, shell caching is unchanged, and the fetch handler still lets requests through when a static rule is unavailable.
