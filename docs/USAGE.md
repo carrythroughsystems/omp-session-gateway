@@ -67,6 +67,8 @@ To return to the directory from full screen, tap the top-left back button (label
 - **View** is read-only (`Read-only session — watching only`): tapping any row under **Live sessions** opens **View** so you can read the live transcript and tool output without sending input. If the host shared the session with Control enabled, tap **Control** in the top bar to switch to writable mode in place.
 - **Control** is writable: send prompts, answer waiting requests, or tap **Stop** to abort a running reply.
 
+Open **OMP Sessions**, including **View** and **Control**, in your browser or the installed app, not in a web page shown inside Tern (a Tern browser block, in a pane or as a floating picture in picture). Tern's browser automation, which Tern plugins and Tern's assistant can use, can read any web page shown inside Tern, your own included, and with it the secret collaboration link of a session you opened there ([Capability handling](SECURITY.md#6-capability-handling)).
+
 To attach images in **Control**:
 
 1. Tap **Photo** in the composer and choose **Take photo** (rear camera) or **Choose existing** (photo library or files). You can attach up to 4 JPEG, PNG, or WebP images per prompt (source files up to 24 MiB, 8,192 px per edge, and 20 megapixels, resized in the browser to metadata-free JPEGs within 2,048 px and 1 MiB).
